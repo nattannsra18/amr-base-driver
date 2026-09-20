@@ -19,6 +19,14 @@ maps/
 *.pgm
 *.posegraph
 
+# ESP32 build products (source and documentation remain tracked)
+firmware/**/build/
+firmware/**/*.bin
+firmware/**/*.elf
+firmware/**/*.map
+firmware/**/sdkconfig
+firmware/**/compile_commands.json
+
 # Editor and OS files
 .vscode/
 .idea/

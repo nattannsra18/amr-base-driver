@@ -6,6 +6,8 @@ This ROS 2 Jazzy package contains the physical base driver, safety controls,
 sensor conditioning, synchronous SLAM launch, and AMCL localization launch for
 an ODROID-C4 indoor delivery robot. The current validated configuration and
 measured results are documented in [docs/VALIDATION.md](docs/VALIDATION.md).
+The matching ESP32 source and its build/flash safety procedure are in
+[firmware/esp32](firmware/esp32/README.md).
 
 > **Safety:** Motor output defaults to disabled. Keep a physical motor cutoff
 > within reach, clear latched faults only after freeing the robot, and perform
