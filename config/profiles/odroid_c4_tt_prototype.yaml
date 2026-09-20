@@ -1,0 +1,41 @@
+# Physical prototype profile for the ODROID-C4 differential-drive robot.
+#
+# This profile intentionally reports DEGRADED until real /battery_state and
+# /safety/physical_estop publishers are commissioned. It must not be changed to
+# simulation mode or supplied with fabricated safety telemetry to obtain READY.
+amr_web_bridge:
+  ros__parameters:
+    robot_serial_number: AMR-ODROID-C4-001
+    robot_display_name: Indoor Delivery Robot Prototype
+    profile_version: odroid-c4-tt-prototype-v1
+    hardware_contract_mode: prototype
+    agent_capabilities: navigation,localization,diagnostics
+
+    pose_topic: /amcl_pose
+    map_topic: /map
+    odom_topic: /odometry/filtered
+    scan_topic: /scan
+    battery_topic: /battery_state
+    physical_estop_topic: /safety/physical_estop
+    physical_estop_stale_seconds: 2.0
+    diagnostics_topic: /diagnostics
+    path_topic: /plan
+    navigate_action: /navigate_to_pose
+    compute_path_action: /compute_path_to_pose
+    load_map_service: /map_server/load_map
+    initial_pose_topic: /initialpose
+    amcl_state_service: /amcl/get_state
+    global_localization_service: /reinitialize_global_localization
+    emergency_stop_cmd_vel_topic: /cmd_vel
+    base_frame: base_footprint
+
+    maps_directory: /home/odroid/amr_ws/maps
+    active_map_id: slam_post_wheel_repair_20260920_082948
+    heartbeat_period: 5.0
+    telemetry_period: 1.0
+    diagnostics_stale_after_seconds: 3.0
+    diagnostics_expire_after_seconds: 60.0
+    profile_data_freshness_seconds: 3.0
+    path_max_poses: 500
+    path_publish_period: 0.5
+    emergency_stop_zero_rate: 10.0

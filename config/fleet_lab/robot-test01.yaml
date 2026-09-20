@@ -1,0 +1,16 @@
+identity:
+  serial_number: FLEET-TEST-0001
+  display_name: Robot Test 01
+  profile_version: fleet-test-diagnostics-v1
+ros:
+  namespace: /robot_test01
+  active_map_id: lab_map
+capabilities:
+  - diagnostics
+  - localization
+simulation:
+  battery_percent: 48
+  x: 0.0
+  y: 0.0
+  yaw: 3.14
+  navigation_delay_seconds: 4.0

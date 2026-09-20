@@ -1,0 +1,18 @@
+identity:
+  serial_number: FLEET-SIM-0001
+  display_name: Fleet Simulator 01
+  profile_version: fleet-sim-navigation-v1
+ros:
+  namespace: /sim01
+  active_map_id: warehouse_map
+capabilities:
+  - navigation
+  - mapping
+  - localization
+  - diagnostics
+simulation:
+  battery_percent: 91
+  x: -2.0
+  y: -0.5
+  yaw: 0.0
+  navigation_delay_seconds: 2.0

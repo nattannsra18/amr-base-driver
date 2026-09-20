@@ -1,0 +1,28 @@
+[Unit]
+Description=Indoor Delivery Robot Agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=indoor-robot
+Group=indoor-robot
+EnvironmentFile=/etc/indoor-delivery-robot/agent.env
+StateDirectory=indoor-delivery-robot
+UMask=0077
+ExecStart=/usr/bin/bash -lc 'source "/opt/ros/$ROS_DISTRO/setup.bash" && source "$ROBOT_WORKSPACE/setup.bash" && exec ros2 run amr_web_bridge web_bridge_node --ros-args --params-file "$ROBOT_PROFILE_FILE" -p server_url:="$ROBOT_CONTROL_URL"'
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/indoor-delivery-robot
+
+[Install]
+WantedBy=multi-user.target
