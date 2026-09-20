@@ -1,210 +1,183 @@
-# Physical AMR Base Driver
+# My Physical AMR Base Driver
 
 [![ROS 2](https://img.shields.io/badge/ROS%202-Jazzy-22314E?logo=ros)](https://docs.ros.org/en/jazzy/)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white)](https://releases.ubuntu.com/24.04/)
 [![Platform](https://img.shields.io/badge/SBC-ODROID--C4-4C566A)](https://www.hardkernel.com/shop/odroid-c4/)
-[![Tests](https://img.shields.io/badge/validated%20baseline-34%20tests-2EA44F)](docs/VALIDATION.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-ROS 2 Jazzy hardware integration for a differential-drive indoor delivery
-robot. The package connects an ODROID-C4, ESP32 motor controller, YDLidar X3,
-wheel encoders, and MPU6050 into a safety-oriented physical stack for manual
-driving, synchronous SLAM, and AMCL localization.
+This is the ROS 2 Jazzy package I use on my physical indoor delivery robot. It
+connects an ODROID-C4, ESP32 motor controller, YDLidar X3, wheel encoders, and
+MPU6050 so I can drive the robot, build maps with `slam_toolbox`, and localize
+with AMCL.
 
-This repository contains the robot-side base layer. The web operations
-platform and the simulation/vision stack are maintained as related projects:
-
-- [Indoor Delivery Robot Platform](https://github.com/nattannsra18/indoor-delivery-robot)
-- [AMR Navigation, Vision & Diagnostics](https://github.com/nattannsra18/amr-navigation-vision-diagnostics)
+This repository contains my robot-side hardware code. The related projects are
+[Indoor Delivery Robot Platform](https://github.com/nattannsra18/indoor-delivery-robot)
+and
+[AMR Navigation, Vision & Diagnostics](https://github.com/nattannsra18/amr-navigation-vision-diagnostics).
 
 > [!CAUTION]
-> Motor output is disabled by default. Keep a physical motor cutoff within
-> reach, clear faults only after freeing the robot, and perform the first run
-> after every mechanical change with the wheels unable to propel the chassis.
+> Motors start disabled by default. I keep the physical motor cutoff within
+> reach, clear faults only after removing their physical cause, and do the
+> first test after any mechanical change with the wheels unable to move the
+> chassis.
 
-## Engineering snapshot
+## What I use
 
-| Area | Current baseline |
+| Part | Role in my robot |
 |---|---|
-| Compute | ODROID-C4, Ubuntu 24.04, ROS 2 Jazzy |
-| Base | Differential drive, TT motors, passive caster |
-| Motor control | ESP32 closed-loop wheel PI, 300 ms command watchdog |
-| Ranging | YDLidar X3, raw scan plus angle-aware 360-beam resampling |
-| State estimation | Wheel odometry + MPU6050 through `robot_localization` EKF |
-| Mapping | Synchronous `slam_toolbox`, 0.03 m/pixel validated profile |
-| Localization | Saved-map `nav2_map_server` + AMCL |
-| Host safety | Default motor lock, command timeout, wheel-feedback motion guard |
-| MCU safety | CRC-16 framing, invalid-packet rejection, watchdog, latched stall fault |
-| Command path | Direct passthrough; Drive Supervisor is deprecated/experimental |
+| ODROID-C4 | Ubuntu 24.04 and ROS 2 Jazzy |
+| ESP32-WROOM DevKit, 38-pin | Wheel PI, encoders, MPU6050, and UART telemetry |
+| TB6612FNG | Left and right TT motor driver |
+| TT motors, encoders, and passive caster | Differential-drive base |
+| YDLidar X3 | Scan for SLAM and localization |
+| `robot_localization` | Fuses wheel odometry with IMU data |
+| `slam_toolbox` | Builds a 2D map |
+| AMCL + map server | Localizes the robot on a saved map |
 
-Measured results, test conditions, and known limitations are recorded in
-[Physical Robot Validation](docs/VALIDATION.md). Private room maps and rosbags
-are intentionally excluded from Git.
+My physical-test notes are in [docs/VALIDATION.md](docs/VALIDATION.md). I keep
+room maps and rosbags out of Git because they contain private layout and test
+data.
 
-## System architecture
+## System overview
 
 ```mermaid
 flowchart LR
-  operator["Operator<br/>RViz / keyboard"]
+  user["Me<br/>RViz / keyboard"] --> command["Teleop or Nav2 command"]
 
   subgraph odroid["ODROID-C4 · ROS 2 Jazzy"]
-    teleop["Teleop / navigation command"]
     relay["cmd_vel_passthrough"]
     bridge["serial_bridge"]
     resampler["scan_resampler"]
     ekf["robot_localization EKF"]
     slam["SLAM Toolbox"]
     amcl["Map server + AMCL"]
-    diagnostics["/diagnostics"]
   end
 
-  subgraph sensors["Physical sensing"]
+  subgraph sensors["Sensors"]
     lidar["YDLidar X3"]
-    encoders["Wheel encoders"]
+    encoder["Wheel encoders"]
     imu["MPU6050"]
   end
 
-  subgraph control["Real-time drive control"]
-    esp32["ESP32<br/>PI + watchdog + fault latch"]
-    driver["TB6612 / motor driver"]
+  subgraph drive["Drive hardware"]
+    esp32["ESP32<br/>wheel PI + watchdog"]
+    driver["TB6612FNG"]
     motors["Left + right motors"]
   end
 
-  operator --> teleop
-  teleop -->|"/cmd_vel"| relay
+  command -->|"/cmd_vel"| relay
   relay -->|"/cmd_vel_safe"| bridge
   bridge <-->|"115200 baud<br/>binary + CRC-16"| esp32
   esp32 --> driver --> motors
-
-  encoders --> esp32
+  encoder --> esp32
   imu --> esp32
-  esp32 -->|"wheel counts + IMU + faults"| bridge
-  bridge -->|"/wheel/odometry"| ekf
-  bridge -->|"/imu/data_raw"| ekf
-  bridge --> diagnostics
-
+  esp32 -->|"/wheel/odometry<br/>/imu/data_raw<br/>/diagnostics"| bridge
+  bridge --> ekf
   lidar -->|"/scan_raw"| resampler
   resampler -->|"/scan"| slam
   resampler -->|"/scan"| amcl
-  ekf -->|"/odometry/filtered<br/>odom → base_footprint"| slam
-  ekf -->|"/odometry/filtered<br/>odom → base_footprint"| amcl
+  ekf -->|"/odometry/filtered"| slam
+  ekf -->|"/odometry/filtered"| amcl
 ```
 
-The ODROID owns ROS orchestration and state estimation. The ESP32 owns the
-hard real-time wheel loop and stops PWM if commands expire. Mapping and
-localization consume the same conditioned scan and EKF odometry but are run as
-separate operating modes.
+The ODROID runs ROS, state estimation, and diagnostics. The ESP32 handles the
+wheel loop and turns PWM off when commands stop arriving. SLAM and AMCL share
+the same scan and EKF output, but I run them as separate modes.
 
-## Power distribution and physical pinout
+## Power and pinout
 
-The wiring image was intentionally removed until it can be checked against the
-assembled robot. Use the firmware-backed table below as the current reference.
-The controller is an ESP32-WROOM DevKit with 38 pins, installed in a 38-pin
-I/O expansion board.
+I removed the wiring image because I want the published diagram to match the
+assembled robot exactly. The following table is the pinout currently used by my
+firmware. The controller is a 38-pin ESP32-WROOM DevKit in a 38-pin I/O
+expansion board.
 
-### Confirmed signal pinout
+| Used for | ESP32 pin | Connected to |
+|---|---:|---|
+| UART receive from ODROID | GPIO34 (`RX2`) | ODROID-C4 pin 32, `UART_EE_C` TX |
+| UART transmit to ODROID | GPIO23 (`TX2`) | ODROID-C4 pin 26, `UART_EE_C` RX |
+| UART ground | GND | ODROID-C4 pin 6 GND |
+| Left encoder A / B | GPIO25 / GPIO26 | Left motor encoder A / B |
+| Right encoder A / B | GPIO35 / GPIO33 | Right motor encoder A / B; GPIO35 needs an external pull-up |
+| MPU6050 SDA / SCL | GPIO21 / GPIO22 | MPU6050 SDA / SCL |
+| Left motor PWM / direction | GPIO14 / GPIO18 / GPIO19 | TB6612FNG `PWMA` / `AIN1` / `AIN2` |
+| Right motor PWM / direction | GPIO27 / GPIO16 / GPIO17 | TB6612FNG `PWMB` / `BIN1` / `BIN2` |
+| Motor standby | GPIO32 | TB6612FNG `STBY`; LOW stops motor output |
 
-| Function | ESP32 pin | Connected endpoint | Verification source |
-|---|---:|---|---|
-| Host UART receive | GPIO34 (`RX2`) | ODROID-C4 pin 32 (`UART_EE_C` TX) | Firmware |
-| Host UART transmit | GPIO23 (`TX2`) | ODROID-C4 pin 26 (`UART_EE_C` RX) | Firmware |
-| Host UART reference | GND | ODROID-C4 pin 6 GND | Firmware |
-| Left encoder A | GPIO25 | Left motor encoder A | Firmware |
-| Left encoder B | GPIO26 | Left motor encoder B | Firmware |
-| Right encoder A | GPIO35 | Right motor encoder A; external pull-up required | Firmware |
-| Right encoder B | GPIO33 | Right motor encoder B | Firmware |
-| IMU I²C data | GPIO21 (`SDA`) | MPU6050 SDA | Firmware |
-| IMU I²C clock | GPIO22 (`SCL`) | MPU6050 SCL | Firmware |
-| Left motor PWM | GPIO14 | TB6612FNG `PWMA` | Firmware |
-| Left motor direction 1 | GPIO18 | TB6612FNG `AIN1` | Firmware |
-| Left motor direction 2 | GPIO19 | TB6612FNG `AIN2` | Firmware |
-| Right motor PWM | GPIO27 | TB6612FNG `PWMB` | Firmware |
-| Right motor direction 1 | GPIO16 | TB6612FNG `BIN1` | Firmware |
-| Right motor direction 2 | GPIO17 | TB6612FNG `BIN2` | Firmware |
-| Hardware motor standby | GPIO32 | TB6612FNG `STBY`; LOW is motor stop | Firmware |
+GPIO1 and GPIO3 stay free for USB flashing and the Arduino serial monitor.
 
-### Power and interface boundaries
+| Power path | What it powers |
+|---|---|
+| 2S 18650, 5000 mAh pack | TB6612FNG motor supply and ESP32 expansion-board DC input |
+| 5 V, 5000 mAh power bank | ODROID-C4 |
+| ODROID-C4 USB host | YDLidar X3 power and data |
+| Shared GND | ODROID, ESP32, motor driver, and sensors use the same signal reference |
 
-| Domain | Source and destination | Status |
-|---|---|---|
-| Propulsion/control power | 2S 18650, 5000 mAh pack → TB6612FNG motor supply and ESP32 expansion-board DC input | User-confirmed topology; verify polarity, fuse/cutoff, carrier input range, and logic-voltage jumper at the robot |
-| Compute power | 5 V, 5000 mAh power bank → ODROID-C4 | User-confirmed topology; verify cable and input-current rating |
-| LiDAR | ODROID-C4 USB host → YDLidar X3 power and data | Deployed ROS configuration |
-| Signal reference | ODROID, ESP32, motor driver, sensors, and both supplies share GND | Required for UART and GPIO; keep motor current return separate from sensitive signal wiring |
+The 2S positive rail and 5 V power-bank rail are separate. I never apply the
+2S positive rail to the ODROID, GPIO pins, or a logic rail. Before powering
+the robot, I check battery polarity, the fuse/cutoff, carrier input range,
+logic-voltage jumper, and ground continuity.
 
-GPIO1 and GPIO3 are reserved for USB flashing and serial monitoring. Do not
-apply the 2S positive rail to the ODROID, GPIO pins, or a logic-voltage rail.
-Verify physical polarity and continuity before energizing the robot.
+## Command path and safety
 
-## Command and safety path
-
-Exactly one node is allowed to publish `/cmd_vel_safe`. Direct passthrough is
-the supported path; the former caster-compensation supervisor remains only for
-attended regression work because it previously degraded SLAM consistency.
+I use direct passthrough as the normal command path. The old Drive Supervisor
+stays in the repository for experiments, but I keep it disabled because it
+made SLAM worse on my physical robot.
 
 ```mermaid
 flowchart LR
-  command["/cmd_vel"] --> freshness{"Command fresh?"}
-  freshness -- No --> stop["STOP"]
-  freshness -- Yes --> relay["cmd_vel_passthrough"]
+  command["/cmd_vel"] --> fresh{"Command is fresh?"}
+  fresh -- No --> stop["STOP"]
+  fresh -- Yes --> relay["cmd_vel_passthrough"]
   relay --> safe["/cmd_vel_safe"]
   safe --> host{"Host checks"}
   host -- "locked / stale telemetry / wheel fault" --> stop
   host -- Pass --> serial["UART wheel targets"]
   serial --> mcu{"ESP32 checks"}
-  mcu -- "CRC / watchdog / encoder stall" --> pwm0["PWM = 0<br/>fault latched"]
-  mcu -- Pass --> pi["Wheel PI control"]
-  pi --> motors["Motor driver"]
+  mcu -- "bad packet / watchdog / encoder stall" --> pwm0["PWM = 0<br/>fault latched"]
+  mcu -- Pass --> pi["Wheel PI"]
+  pi --> motors["TB6612FNG + motors"]
   stop --> serialstop["UART STOP"]
   serialstop --> pwm0
 ```
 
-Safety is layered rather than delegated to one process:
+I rely on several layers of protection:
 
-1. Launch files default to `enable_motors:=false`.
-2. The teleop path has a dead-man timeout and publishes at a watchdog-safe rate.
-3. The host motion guard compares commands with wheel feedback.
-4. The serial bridge rejects arming when telemetry or faults are unsafe.
-5. The ESP32 independently enforces packet validation and a 300 ms watchdog.
-6. The physical motor cutoff remains the final attended-test control.
+1. Every launch starts with `enable_motors:=false`.
+2. Teleop has a dead-man timeout.
+3. The host motion guard compares the command with wheel feedback.
+4. The serial bridge refuses to arm with stale telemetry or an active fault.
+5. The ESP32 checks packets and stops after a 300 ms command timeout.
+6. The physical motor cutoff stays within reach during every attended test.
 
-A software stop is an engineering safeguard, not a replacement for a
-certified emergency-stop circuit.
+A software stop is useful, but it is not a replacement for a certified
+emergency stop.
 
-## State estimation and TF ownership
+## Frames, odometry, and geometry
 
 ```mermaid
 flowchart TB
-  map["map"] -->|"SLAM Toolbox or AMCL<br/>one authority per mode"| odom["odom"]
+  map["map"] -->|"SLAM Toolbox or AMCL<br/>one authority at a time"| odom["odom"]
   odom -->|"robot_localization EKF"| footprint["base_footprint"]
   footprint -->|"static z = 0.0325 m"| base["base_link"]
-  base -->|"static"| laser["laser_frame"]
-  base -->|"static"| imu["imu_link"]
-
-  wheel["Wheel forward velocity + yaw rate"] --> ekf["EKF"]
+  base -->|static| laser["laser_frame"]
+  base -->|static| imu["imu_link"]
+  wheel["Wheel velocity + yaw rate"] --> ekf["EKF"] --> odom
   gyro["MPU6050 angular velocity"] --> ekf
-  ekf --> odom
-  scan["YDLidar /scan"] --> absolute["LiDAR map matching"]
-  absolute --> map
+  scan["YDLidar /scan"] --> matching["LiDAR map matching"] --> map
 ```
 
-The MPU6050 has no magnetometer. Wheel odometry and gyro yaw rate provide local
-motion estimation; long-term absolute yaw comes from LiDAR SLAM or AMCL. Only
-one node may publish each TF edge.
+The MPU6050 has no magnetometer. I use wheel data and gyro yaw rate for local
+motion, then use LiDAR mapping or localization to correct long-term heading.
+Only one node should publish each TF edge.
 
-## Measured physical geometry
-
-`base_footprint` is on the floor below the midpoint of the wheel axle.
-`base_link` is one loaded wheel radius above it.
-
-| Item | Measured value | Transform from `base_link` |
+| Item | Measurement | Transform from `base_link` |
 |---|---:|---:|
 | Wheel radius | 0.0325 m | n/a |
 | Wheel separation | 0.355 m centre-to-centre | n/a |
 | LiDAR | x=0.345 m from front, z=0.395 m from floor | x=-0.042, y=-0.005, z=0.3625, yaw=0 |
 | MPU6050 | x=0.030 m from front, z=0.075 m from floor | x=0.273, y=0, z=0.0425, yaw=0 |
 
-The conservative physical navigation footprint is:
+I use this conservative footprint for physical navigation:
 
 ```text
 [[ 0.303,  0.190],
@@ -213,72 +186,35 @@ The conservative physical navigation footprint is:
  [-0.087,  0.190]]
 ```
 
-Geometry is chassis-specific. Re-measure it under the robot's real floor load
-after changing wheels, hubs, sensor mounts, or the caster assembly.
+I remeasure this geometry after changing wheels, hubs, sensor mounts, or the
+caster.
 
 ## ROS interfaces
 
-### Published topics
+| Topic | What I use it for |
+|---|---|
+| `/scan_raw` | Original YDLidar samples |
+| `/scan` | Angle-aware, fixed 360-beam scan |
+| `/wheel/odometry` | Encoder-derived base motion |
+| `/odometry/filtered` | EKF output for SLAM and localization |
+| `/imu/data_raw` | Calibrated MPU6050 measurement |
+| `/joint_states` | Wheel state |
+| `/diagnostics` | Serial, MCU, motion, and sensor health |
 
-| Topic | Type | Purpose |
-|---|---|---|
-| `/scan_raw` | `sensor_msgs/LaserScan` | Original YDLidar samples |
-| `/scan` | `sensor_msgs/LaserScan` | Angle-aware, fixed 360-beam scan |
-| `/wheel/odometry` | `nav_msgs/Odometry` | Encoder-derived base motion |
-| `/odometry/filtered` | `nav_msgs/Odometry` | EKF output used by SLAM/localization |
-| `/imu/data_raw` | `sensor_msgs/Imu` | Calibrated raw MPU6050 measurement |
-| `/joint_states` | `sensor_msgs/JointState` | Wheel joint state |
-| `/diagnostics` | `diagnostic_msgs/DiagnosticArray` | Serial, MCU, motion, and sensor health |
-
-### Commands and services
-
-| Interface | Purpose |
+| Interface | What I use it for |
 |---|---|
 | `/cmd_vel` | Input velocity command |
-| `/cmd_vel_safe` | Single-owner command delivered to the base bridge |
-| `/set_motors_enabled` | Arm or lock motor output without restarting ROS |
-| `/clear_motor_fault` | Clear a latched fault after the physical cause is removed |
+| `/cmd_vel_safe` | The only command topic sent to the base bridge |
+| `/set_motors_enabled` | Arm or lock the motors without restarting ROS |
+| `/clear_motor_fault` | Clear a latched fault after I fix its physical cause |
 | `/reset_wheel_odometry` | Reset integrated wheel pose while stopped |
 
-## Operating modes
+## Build and first checks
 
-```mermaid
-stateDiagram-v2
-  [*] --> Locked
-  Locked --> SensorValidation: base_hardware / motors false
-  Locked --> Mapping: mapping launch / motors false
-  Locked --> Localization: localization launch / motors false
-  SensorValidation --> Locked: stop launch
-  Mapping --> ArmedMapping: attended arm
-  ArmedMapping --> Mapping: software stop or lock
-  Mapping --> SavedMap: save map
-  SavedMap --> Localization: load map + set initial pose
-  Localization --> Locked: stop launch
-  state "Motor output locked" as Locked
-  state "Sensor and TF validation" as SensorValidation
-  state "SLAM active" as Mapping
-  state "Attended mapping motion" as ArmedMapping
-  state "Map artifact" as SavedMap
-  state "AMCL active" as Localization
-```
-
-Never switch from validation to motion only because nodes are running. Check
-the physical area, cutoff, scan alignment, diagnostics, and current robot pose.
-
-## Quick start
-
-### Prerequisites
-
-- Ubuntu 24.04 with ROS 2 Jazzy
-- `robot_localization`, `slam_toolbox`, Nav2 map server, and AMCL
-- A colcon workspace containing this package and `ydlidar_ros2_driver`
-- Stable device names from [`99-amr-serial.rules`](99-amr-serial.rules)
-
-The deployed USB topology assigns `/dev/robot-esp32` to port 1.4 and
-`/dev/robot-lidar` to port 1.1. The production ESP32 link uses the ODROID
-`UART_EE_C` device at `/dev/ttyAML6`, 115200 baud.
-
-### Build and test
+I need Ubuntu 24.04 with ROS 2 Jazzy, `robot_localization`, `slam_toolbox`,
+Nav2 map server, AMCL, and `ydlidar_ros2_driver` in the same colcon workspace.
+My USB rules map `/dev/robot-esp32` to port 1.4 and `/dev/robot-lidar` to port
+1.1. The production UART link uses `/dev/ttyAML6` at 115200 baud.
 
 ```bash
 cd ~/amr_ws
@@ -289,7 +225,7 @@ colcon test --packages-select amr_base_driver
 colcon test-result --verbose
 ```
 
-### Validate hardware with motors locked
+I always start by keeping the motors locked:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -297,51 +233,43 @@ source ~/amr_ws/install/setup.bash
 ros2 launch amr_base_driver base_hardware.launch.py enable_motors:=false
 ```
 
-Confirm that `/diagnostics`, `/wheel/odometry`, `/imu/data_raw`, `/scan`, and
-the complete TF chain are healthy before any floor test.
-
-For an attended test, arm without restarting the stack only after those checks
-pass and the physical cutoff is ready:
+Before a floor test, I check `/diagnostics`, `/wheel/odometry`,
+`/imu/data_raw`, `/scan`, and the TF chain. In a clear area with the cutoff
+ready, I arm without restarting ROS:
 
 ```bash
 ros2 service call /set_motors_enabled std_srvs/srv/SetBool "{data: true}"
 ```
 
-Lock motor output immediately after the run:
+I lock the motors again after an attended run:
 
 ```bash
 ros2 service call /set_motors_enabled std_srvs/srv/SetBool "{data: false}"
 ```
 
-Arming sends `STOP` first and requires a fresh command before motion. It is
-rejected when serial telemetry is stale or an MCU/host motion fault is active.
-
-## Mapping workflow
+## Mapping and localization
 
 The X3 publishes original points on `/scan_raw`. `scan_resampler` maps them by
-angle into a stable 360-beam `/scan`; the YDLidar SDK `fixed_resolution` option
-must remain disabled because it truncates points while the motor speed settles.
+angle into a fixed 360-beam `/scan`. I keep the YDLidar SDK `fixed_resolution`
+option disabled because it can truncate points while the LiDAR motor settles.
 
-Start SLAM with motor output locked:
+To map, I start with motors locked:
 
 ```bash
 ros2 launch amr_base_driver mapping.launch.py enable_motors:=false
 ```
 
-For attended mapping only, verify the fuse, physical cutoff, diagnostics, and
-clear floor before enabling motion. Drive smooth forward segments and rolling
-arcs; avoid high-rate pivots and obstacle contact because both distort scans.
-
-Save the completed map from another terminal:
+For attended mapping, I first check the fuse, cutoff, diagnostics, and clear
+floor. Smooth forward segments and rolling arcs make better maps than fast
+pivots or obstacle contact. When I finish, I save the map from another
+terminal:
 
 ```bash
 mkdir -p ~/maps
 ros2 run nav2_map_server map_saver_cli -f ~/maps/indoor_map
 ```
 
-## Localization workflow
-
-Start the same physical sensing and estimation stack with a saved map:
+To localize on a saved map:
 
 ```bash
 ros2 launch amr_base_driver localization.launch.py \
@@ -349,51 +277,47 @@ ros2 launch amr_base_driver localization.launch.py \
   enable_motors:=false
 ```
 
-In RViz, set the initial pose in the `map` frame and verify that `/scan`
-overlaps the occupied map cells. Do not expect `/amcl_pose` or `map -> odom`
-before the initial pose is established.
+In RViz, I set the initial pose in the `map` frame and make sure `/scan`
+overlaps the map. If another launch already publishes
+`base_link -> laser_frame`, I use `publish_sensor_tf:=false` until I remove
+the duplicate TF publisher.
 
-If another stack already owns `base_link -> laser_frame`, launch with
-`publish_sensor_tf:=false` until the duplicate authority is removed.
+## Nav2 status
 
-## Attended keyboard station
+I am validating the physical Nav2 profile in my working tree. It uses AMCL,
+Navfn, Regulated Pure Pursuit, velocity smoothing, and a laser collision
+monitor with conservative limits for the passive caster. I will publish its
+launch file and repeatable floor-test procedure after the remaining obstacle
+test is complete.
 
-`robot_station.sh station` opens the mapping stack, a watchdog-friendly WASD
-controller, and the live sensor dashboard. The controller publishes at 20 Hz
-while a motion key remains fresh and sends zero after 0.35 seconds without
-input. Space or X stops immediately; Q exits. Press R while stopped to reset
-wheel odometry before a tape-measure run.
+## Keyboard station and fault recovery
+
+`robot_station.sh station` opens the mapping stack, a WASD controller, and a
+live sensor dashboard. It publishes at 20 Hz while I hold a movement key and
+sends zero after 0.35 seconds without input. Space or X stops, Q exits, and R
+resets wheel odometry while stopped.
 
 ```bash
 ./robot_station.sh station
-```
-
-From another terminal, send a software stop with:
-
-```bash
 ./robot_station.sh stop
 ```
 
-## Fault recovery
-
-After physically clearing the robot and confirming that it is stopped:
+After I physically clear the robot and confirm it has stopped, I can clear a
+latched fault:
 
 ```bash
 ros2 service call /clear_motor_fault std_srvs/srv/Trigger '{}'
 ```
 
-Do not move again until `/diagnostics` reports `mcu_fault=0`, an empty
+I do not move again until `/diagnostics` reports `mcu_fault=0`, an empty
 `host_motion_fault`, fresh serial telemetry, and zero wheel motion.
 
-## Firmware and transport
+## Firmware and UART
 
-The matching ESP32 firmware and safe flash procedure live in
-[`firmware/esp32`](firmware/esp32/README.md). The link uses a fixed 44-byte
-binary telemetry frame with CRC-16. The deployed controller uses a 40 MHz
-flash clock because the physical board produced repeatable bootloader checksum
-failures at 80 MHz.
-
-UART wiring on the ODROID-C4 40-pin header:
+The ESP32 source and flashing guide are in
+[`firmware/esp32`](firmware/esp32/README.md). It uses a fixed 44-byte binary
+telemetry frame with CRC-16. I use a 40 MHz flash clock because the physical
+controller produced repeatable bootloader checksum failures at 80 MHz.
 
 | ODROID-C4 | ESP32 |
 |---|---|
@@ -401,7 +325,18 @@ UART wiring on the ODROID-C4 40-pin header:
 | Pin 26 RX | GPIO23 TX2 |
 | Ground | Ground |
 
-ESP32 power is supplied separately. USB is connected only when flashing.
+The ESP32 has its own power source. I connect its USB cable only while
+flashing.
+
+## Current limitations
+
+- I keep Drive Supervisor disabled for normal use because it previously
+  distorted SLAM on this robot.
+- The MPU6050 cannot provide an absolute heading by itself.
+- Encoders cannot tell me if a wheel hub slips on its motor shaft.
+- Floor friction and caster orientation still affect low-speed movement.
+- I repeat geometry, stopping, and localization tests after physical changes.
+- Software safeguards do not replace a physical emergency-stop circuit.
 
 ## Repository layout
 
@@ -410,33 +345,17 @@ amr-base-driver/
 ├── amr_base_driver/       # ROS nodes, protocol, safety, and conditioning
 ├── config/                # Base, EKF, LiDAR, SLAM, and AMCL parameters
 ├── launch/                # Hardware, mapping, and localization bringup
-├── firmware/esp32/        # Deployed controller source and flash guide
+├── firmware/esp32/        # ESP32 source and flashing guide
 ├── test/                  # Protocol, safety, estimation, and scan tests
-├── docs/VALIDATION.md     # Measured physical validation evidence
+├── docs/VALIDATION.md     # Physical-test notes
 ├── 99-amr-serial.rules    # Stable USB device naming
-└── robot_station.sh       # Attended mapping/calibration workstation
+└── robot_station.sh       # Mapping/calibration workstation
 ```
-
-## Validation status and limitations
-
-The committed physical baseline has passed build and 34 package tests. It has
-also demonstrated synchronous SLAM and AMCL localization on the real robot.
-See [docs/VALIDATION.md](docs/VALIDATION.md) for the measured LiDAR scale,
-localization comparison, map resolution, and exact test boundaries.
-
-Important limitations:
-
-- The Drive Supervisor is deprecated/experimental and disabled by default.
-- The MPU6050 cannot provide absolute heading without LiDAR localization.
-- Encoder telemetry cannot detect a wheel hub slipping on its motor shaft.
-- Floor friction and passive-caster orientation still affect low-speed motion.
-- Physical changes require renewed geometry, stopping, and localization tests.
-- Software safeguards do not replace a physical emergency-stop circuit.
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE).
+This project is licensed under the [Apache License 2.0](LICENSE).
 
 ## Author
 
-Designed and developed by [nattannsra18](https://github.com/nattannsra18).
+Built by [nattannsra18](https://github.com/nattannsra18).
