@@ -158,12 +158,13 @@
 
   <!-- Domain A power and control paths -->
   <path d="M350 325 H420" class="power-a"/>
-  <path d="M650 325 H692 V280 H735" class="power-a"/>
-  <path d="M650 325 H1168 V280 H1225" class="power-a"/>
+  <path d="M650 325 H690 V208 H1168 V280 H1225" class="power-a"/>
+  <path d="M690 208 V280 H735" class="power-a"/>
   <path d="M1125 385 H1165 V390 H1225" class="signal"/>
   <path d="M1500 335 H1565" class="motor"/>
-  <text x="367" y="308" class="label" fill="#c2410c">2S</text>
-  <text x="667" y="306" class="label" fill="#c2410c">fused + switched</text>
+  <text x="830" y="202" class="label" fill="#c2410c">
+    FUSED + SWITCHED 2S BUS
+  </text>
   <text x="1138" y="372" class="label" fill="#047857">GPIO</text>
 
   <!-- Domain B blocks -->
@@ -227,9 +228,15 @@
   <text x="1188" y="528" class="label" fill="#6d28d9">I²C SDA/SCL</text>
 
   <!-- Common ground -->
-  <path d="M170 500 V820 H1630" class="ground"/>
-  <path d="M555 398 V820 M930 450 V820 M1360 450 V820
-           M675 765 V820 M1180 765 V820 M1560 665 V820 M1560 780 V820"
+  <path d="M85 820 H1710" class="ground"/>
+  <path d="M225 420 H85 V820
+           M555 398 V535 H455 V820
+           M930 450 V820
+           M1360 450 V820
+           M675 765 V820
+           M1180 765 V820
+           M1680 665 H1710 V820
+           M1560 780 V820"
         class="ground"/>
   <text x="735" y="811" class="label" fill="#334155">
     COMMON SIGNAL GROUND · required for UART and control references
