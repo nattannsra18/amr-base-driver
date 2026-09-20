@@ -230,7 +230,7 @@
   <!-- Common ground -->
   <path d="M85 820 H1710" class="ground"/>
   <path d="M225 420 H85 V820
-           M555 398 V535 H455 V820
+           M555 398 V520 H1710 V820
            M930 450 V820
            M1360 450 V820
            M675 765 V820
