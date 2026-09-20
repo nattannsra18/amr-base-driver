@@ -10,16 +10,18 @@ connects an ODROID-C4, ESP32 motor controller, YDLidar X3, wheel encoders, and
 MPU6050 so I can drive the robot, build maps with `slam_toolbox`, and localize
 with AMCL.
 
-This repository contains my robot-side hardware code. The related projects are
+This repository contains my robot-side hardware code, physical Nav2 profile,
+and the Robot Agent used to connect this robot to my web control platform.
+The related projects are
 [Indoor Delivery Robot Platform](https://github.com/nattannsra18/indoor-delivery-robot)
 and
 [AMR Navigation, Vision & Diagnostics](https://github.com/nattannsra18/amr-navigation-vision-diagnostics).
 
 > [!CAUTION]
-> Motors start disabled by default. I keep the physical motor cutoff within
-> reach, clear faults only after removing their physical cause, and do the
-> first test after any mechanical change with the wheels unable to move the
-> chassis.
+> A fresh base launch starts with motor output disabled. After I verify
+> telemetry and the physical area, I arm once for the attended session and do
+> not use normal AMCL, Nav2, or web-service restarts to lock the motors. The
+> physical motor cutoff stays within reach at all times.
 
 ## What I use
 
@@ -84,6 +86,49 @@ The ODROID runs ROS, state estimation, and diagnostics. The ESP32 handles the
 wheel loop and turns PWM off when commands stop arriving. SLAM and AMCL share
 the same scan and EKF output, but I run them as separate modes.
 
+## Web Robot Agent
+
+The source for the Robot Agent is included at
+[`robot_agent/amr_web_bridge`](robot_agent/amr_web_bridge). It is the ROS 2
+package that authenticates this ODROID with the FastAPI control plane, reports
+telemetry, diagnostics, maps and Nav2 paths, and accepts only authenticated
+navigation or emergency commands. The physical ODROID profile and hardened
+systemd unit are included with the package.
+
+I build the base driver and Agent together from the same workspace:
+
+```bash
+cd ~/amr_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --symlink-install --packages-select amr_base_driver amr_web_bridge
+source install/setup.bash
+```
+
+The profile in
+`robot_agent/amr_web_bridge/config/profiles/odroid_c4_tt_prototype.yaml` is
+the starting point for this chassis. Connection URL, enrollment token, and
+credential file are deployment secrets and stay outside Git. The Agent can be
+started with the profile after those values are configured:
+
+```bash
+ros2 run amr_web_bridge web_bridge_node --ros-args \
+  --params-file ~/amr_ws/src/amr_base_driver/robot_agent/amr_web_bridge/config/profiles/odroid_c4_tt_prototype.yaml \
+  -p server_url:=wss://control.example.com
+```
+
+For the ODROID service installation, I use the included installer. It builds a
+relocatable Agent workspace, installs the profile and credentials with limited
+permissions, then enables `indoor-delivery-robot-agent.service`. I check the
+commands first with `--dry-run`; the enrollment token is read from a protected
+file or environment variable, never from the command line.
+
+```bash
+sudo ./scripts/install_robot_agent.sh \
+  --profile robot_agent/amr_web_bridge/config/profiles/odroid_c4_tt_prototype.yaml \
+  --control-url wss://control.example.com \
+  --enrollment-token-file /path/to/protected-token
+```
+
 ## Power and pinout
 
 I removed the wiring image because I want the published diagram to match the
@@ -142,7 +187,8 @@ flowchart LR
 
 I rely on several layers of protection:
 
-1. Every launch starts with `enable_motors:=false`.
+1. A cold base launch defaults to `enable_motors:=false`; I arm after the
+   physical area and telemetry are ready.
 2. Teleop has a dead-man timeout.
 3. The host motion guard compares the command with wheel feedback.
 4. The serial bridge refuses to arm with stale telemetry or an active fault.
@@ -225,7 +271,8 @@ colcon test --packages-select amr_base_driver
 colcon test-result --verbose
 ```
 
-I always start by keeping the motors locked:
+I start a new base session with motor output disabled, verify the system, then
+arm once for the attended run:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -241,11 +288,8 @@ ready, I arm without restarting ROS:
 ros2 service call /set_motors_enabled std_srvs/srv/SetBool "{data: true}"
 ```
 
-I lock the motors again after an attended run:
-
-```bash
-ros2 service call /set_motors_enabled std_srvs/srv/SetBool "{data: false}"
-```
+I use the physical cutoff or a deliberate software stop when motion must stop;
+normal localization, Nav2, and web-service restarts do not lock the motors.
 
 ## Mapping and localization
 
@@ -253,7 +297,8 @@ The X3 publishes original points on `/scan_raw`. `scan_resampler` maps them by
 angle into a fixed 360-beam `/scan`. I keep the YDLidar SDK `fixed_resolution`
 option disabled because it can truncate points while the LiDAR motor settles.
 
-To map, I start with motors locked:
+To map, I start the nodes first, then arm after checking telemetry and the
+clear travel area:
 
 ```bash
 ros2 launch amr_base_driver mapping.launch.py enable_motors:=false
