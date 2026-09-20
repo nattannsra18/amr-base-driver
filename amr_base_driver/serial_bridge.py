@@ -12,7 +12,7 @@ import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
-from std_srvs.srv import Empty, Trigger
+from std_srvs.srv import Empty, SetBool, Trigger
 
 from .motion_guard import MotionGuard
 
@@ -101,6 +101,8 @@ class SerialBridge(Node):
         self.create_subscription(Twist, 'cmd_vel', self.cmd_callback, 10)
         self.create_service(Empty, 'reset_wheel_odometry', self.reset_odom)
         self.create_service(
+            SetBool, 'set_motors_enabled', self.set_motors_enabled)
+        self.create_service(
             Trigger, 'clear_motor_fault', self.clear_motor_fault)
         self.create_timer(0.01, self.io_tick)
         self.create_timer(0.10, self.command_tick)
@@ -130,6 +132,47 @@ class SerialBridge(Node):
         response.success = True
         response.message = (
             'STOP and CLEAR sent; verify diagnostics mcu_fault=0 before motion')
+        return response
+
+    def set_motors_enabled(self, request, response):
+        """Arm or lock motor output without restarting localization/Nav2."""
+        self.requested_linear = 0.0
+        self.requested_angular = 0.0
+        self.last_cmd_monotonic = 0.0
+        self.write_line('STOP')
+
+        if not request.data:
+            self.motors_enabled = False
+            response.success = True
+            response.message = 'Motors locked; STOP sent'
+            self.get_logger().warning(response.message)
+            return response
+
+        now = time.monotonic()
+        telemetry_age = (
+            now - self.last_telemetry_monotonic
+            if self.last_telemetry_monotonic else float('inf'))
+        blockers = []
+        if self.serial_port is None:
+            blockers.append('serial disconnected')
+        if telemetry_age > 0.3:
+            blockers.append(f'telemetry stale ({telemetry_age:.3f}s)')
+        if self.mcu_fault:
+            blockers.append(f'mcu_fault={self.mcu_fault}')
+        if self.motion_guard.fault:
+            blockers.append(f'host_fault={self.motion_guard.fault}')
+        if blockers:
+            self.motors_enabled = False
+            response.success = False
+            response.message = 'Arm rejected: ' + ', '.join(blockers)
+            self.get_logger().error(response.message)
+            return response
+
+        self.motors_enabled = True
+        response.success = True
+        response.message = (
+            'Motors armed; waiting for a new, fresh cmd_vel command')
+        self.get_logger().warning(response.message)
         return response
 
     def cmd_callback(self, message):
@@ -379,7 +422,8 @@ class SerialBridge(Node):
             status.level = DiagnosticStatus.ERROR
             names = {1: 'IMU', 2: 'LEFT_ENCODER_STALL',
                      3: 'RIGHT_ENCODER_STALL', 4: 'ENCODER_DIRECTION'}
-            status.message = f'ESP32 fault {self.mcu_fault}: {names.get(self.mcu_fault, "UNKNOWN")}'
+            fault_name = names.get(self.mcu_fault, 'UNKNOWN')
+            status.message = f'ESP32 fault {self.mcu_fault}: {fault_name}'
         elif self.motion_guard.fault:
             status.level = DiagnosticStatus.ERROR
             status.message = self.motion_guard.fault

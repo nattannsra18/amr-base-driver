@@ -13,6 +13,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/udev', ['99-amr-serial.rules']),
         ('share/' + package_name + '/config', glob('config/*.yaml')),
+        ('share/' + package_name + '/behavior_trees',
+         glob('behavior_trees/*.xml')),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
@@ -25,6 +27,8 @@ setup(
     entry_points={
         'console_scripts': [
             'imu_conditioner = amr_base_driver.imu_conditioner:main',
+            'nav2_activation_gate = '
+            'amr_base_driver.nav2_activation_gate:main',
             'drive_supervisor = amr_base_driver.drive_supervisor:main',
             'cmd_vel_passthrough = '
             'amr_base_driver.cmd_vel_passthrough:main',

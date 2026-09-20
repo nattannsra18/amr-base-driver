@@ -7,6 +7,7 @@ from launch.conditions import IfCondition
 from launch.conditions import UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -14,6 +15,8 @@ def generate_launch_description():
     enable_motors = LaunchConfiguration('enable_motors')
     enable_drive_supervisor = LaunchConfiguration('enable_drive_supervisor')
     publish_sensor_tf = LaunchConfiguration('publish_sensor_tf')
+    ekf_transform_time_offset = LaunchConfiguration(
+        'ekf_transform_time_offset')
     return LaunchDescription([
         DeclareLaunchArgument(
             'enable_motors', default_value='false',
@@ -27,6 +30,11 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'publish_sensor_tf', default_value='true',
             description='Publish measured base, IMU, and LiDAR static transforms.'),
+        DeclareLaunchArgument(
+            'ekf_transform_time_offset', default_value='0.0',
+            description=(
+                'Seconds to future-date odom to base TF. Mapping keeps zero; '
+                'localization may override this to cover measured TF latency.')),
         Node(
             package='amr_base_driver',
             executable='drive_supervisor',
@@ -59,7 +67,11 @@ def generate_launch_description():
             executable='ekf_node',
             name='ekf_filter_node',
             output='screen',
-            parameters=[os.path.join(share, 'config', 'ekf.yaml')],
+            parameters=[
+                os.path.join(share, 'config', 'ekf.yaml'),
+                {'transform_time_offset': ParameterValue(
+                    ekf_transform_time_offset, value_type=float)},
+            ],
             remappings=[('odometry/filtered', '/odometry/filtered')],
         ),
         Node(

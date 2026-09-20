@@ -13,6 +13,8 @@ def resample_ranges(angle_min, angle_increment, ranges, output_beams,
                     range_min, range_max):
     """Place raw samples into fixed angular bins, retaining nearest obstacle."""
     output = [math.inf] * output_beams
+    if not math.isfinite(angle_min) or not math.isfinite(angle_increment):
+        return output
     output_increment = 2.0 * math.pi / output_beams
     for index, value in enumerate(ranges):
         if not math.isfinite(value) or value < range_min or value > range_max:
@@ -23,6 +25,20 @@ def resample_ranges(angle_min, angle_increment, ranges, output_beams,
         if value < output[output_index]:
             output[output_index] = value
     return output
+
+
+def has_valid_scan_metadata(scan):
+    """Return whether scan metadata is safe to forward to navigation."""
+    return (
+        math.isfinite(scan.angle_min) and
+        math.isfinite(scan.angle_increment) and
+        scan.angle_increment != 0.0 and
+        math.isfinite(scan.range_min) and
+        math.isfinite(scan.range_max) and
+        0.0 <= scan.range_min < scan.range_max and
+        math.isfinite(scan.scan_time) and
+        scan.scan_time >= 0.0
+    )
 
 
 class ScanResampler(Node):
@@ -46,6 +62,11 @@ class ScanResampler(Node):
             f'{self.output_beams} beams')
 
     def callback(self, raw):
+        if not has_valid_scan_metadata(raw):
+            self.get_logger().warning(
+                'Dropping LaserScan with invalid metadata',
+                throttle_duration_sec=5.0)
+            return
         output = LaserScan()
         output.header = raw.header
         output.angle_min = -math.pi

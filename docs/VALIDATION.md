@@ -78,3 +78,30 @@ On 2026-09-20:
 - Map server and AMCL reached the active lifecycle state.
 - The complete TF chain and `/amcl_pose` were available.
 - No MCU, host-motion, or serial parsing fault occurred in the final run.
+
+### Initial physical Nav2 bench validation
+
+- The physical footprint, conservative costmaps, Navfn planner, Regulated Pure
+  Pursuit controller, velocity smoother, and collision monitor loaded without
+  parameter or plugin errors.
+- `controller_server`, `planner_server`, `smoother_server`,
+  `velocity_smoother`, `collision_monitor`, and `bt_navigator` all reached the
+  active lifecycle state with motor output locked.
+- Local/global costmap and published-footprint topics were available, and the
+  command chain had exactly one publisher and subscriber at each stage.
+- A temporary identity `map -> odom` transform was used only to exercise the
+  lifecycle without asserting a real initial pose. No navigation goal was sent
+  and no autonomous floor motion has been validated yet.
+
+### First attended Nav2 floor tests
+
+- A 0.30 m straight goal succeeded, moving 0.236 m before entering the 0.08 m
+  goal tolerance. Motion was straight and stopped smoothly with no fault.
+- A 90 degree rotation near an obstacle correctly aborted on predicted
+  collision. Repeating in open space exposed an RPP acceleration deadlock:
+  `/cmd_vel_nav` stayed at 0.04 rad/s because the controller applied its low
+  angular acceleration limit against stationary measured odometry every cycle.
+- The RPP internal `max_angular_accel` is therefore 6.0 rad/s^2, while the
+  downstream open-loop velocity smoother remains the physical limiter at
+  0.40 rad/s^2. This changes one subsystem and preserves the gradual motor
+  command ramp.

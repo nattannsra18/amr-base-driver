@@ -1,0 +1,55 @@
+<!--
+  Physical-robot tree: replan when the path becomes invalid. If navigation
+  fails, clear both costmaps, then try one short collision-checked reverse
+  motion before planning again. Automatic spin remains disabled until it has
+  passed a separate attended caster floor test.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="3" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithConservativeReplanning">
+        <ControllerSelector selected_controller="{selected_controller}"
+                            default_controller="FollowPath"
+                            topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}"
+                         default_planner="GridBased"
+                         topic_name="planner_selector"/>
+        <RateController hz="1.0">
+          <Fallback>
+            <ReactiveSequence>
+              <Inverter>
+                <GlobalUpdatedGoal/>
+              </Inverter>
+              <IsPathValid path="{path}"/>
+            </ReactiveSequence>
+            <ComputePathToPose goal="{goal}"
+                               path="{path}"
+                               planner_id="{selected_planner}"
+                               error_code_id="{compute_path_error_code}"/>
+          </Fallback>
+        </RateController>
+        <FollowPath path="{path}"
+                    controller_id="{selected_controller}"
+                    error_code_id="{follow_path_error_code}"/>
+      </PipelineSequence>
+      <ReactiveFallback name="RecoveryFallback">
+        <GoalUpdated/>
+        <RoundRobin name="ConservativeRecoveryActions">
+          <Sequence name="ClearBothCostmaps">
+            <ClearEntireCostmap
+              name="ClearLocalCostmap"
+              service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap
+              name="ClearGlobalCostmap"
+              service_name="global_costmap/clear_entirely_global_costmap"/>
+          </Sequence>
+          <BackUp backup_dist="0.12"
+                  backup_speed="0.08"
+                  time_allowance="4.0"
+                  error_code_id="{backup_error_code}"/>
+          <Wait wait_duration="1.0"/>
+        </RoundRobin>
+      </ReactiveFallback>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

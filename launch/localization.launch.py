@@ -16,6 +16,8 @@ def generate_launch_description():
     map_file = LaunchConfiguration('map_yaml')
     enable_motors = LaunchConfiguration('enable_motors')
     enable_drive_supervisor = LaunchConfiguration('enable_drive_supervisor')
+    ekf_transform_time_offset = LaunchConfiguration(
+        'ekf_transform_time_offset')
 
     base_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -24,6 +26,7 @@ def generate_launch_description():
             'enable_motors': enable_motors,
             'enable_drive_supervisor': enable_drive_supervisor,
             'publish_sensor_tf': 'true',
+            'ekf_transform_time_offset': ekf_transform_time_offset,
         }.items(),
     )
     lidar = Node(
@@ -87,8 +90,13 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_drive_supervisor', default_value='false',
             description=(
-                'Keep disabled while the caster supervisor remains under '
-                'separate validation.')),
+                'DEPRECATED/EXPERIMENTAL. Keep disabled for the supported '
+                'localization and navigation path.')),
+        DeclareLaunchArgument(
+            'ekf_transform_time_offset', default_value='0.10',
+            description=(
+                'Future offset for odom to base TF during localization. '
+                'The measured controller-side lag reached 93 ms.')),
         base_launch,
         TimerAction(period=3.0, actions=[lidar, scan_resampler]),
         TimerAction(
