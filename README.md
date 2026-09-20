@@ -97,17 +97,44 @@ separate operating modes.
 
 ## Power distribution and physical pinout
 
-![Physical AMR power distribution and controller pinout](docs/assets/system-power-pinout.svg)
+The wiring image was intentionally removed until it can be checked against the
+assembled robot. Use the firmware-backed table below as the current reference.
+The controller is an ESP32-WROOM DevKit with 38 pins, installed in a 38-pin
+I/O expansion board.
 
-The robot uses two positive power domains: a 2S 18650 pack for propulsion and
-the ESP32 expansion board, and a separate 5 V power bank for the ODROID-C4 and
-USB LiDAR. Their positive rails are not tied together. A common signal ground
-is still required between the ODROID, ESP32, sensors, and motor driver so UART
-and GPIO levels have the same reference.
+### Confirmed signal pinout
 
-The SVG is derived from the GPIO constants in the deployed firmware. Verify
-battery polarity, the expansion-board voltage jumper, carrier input rating,
-and ground continuity against the physical robot before energizing it.
+| Function | ESP32 pin | Connected endpoint | Verification source |
+|---|---:|---|---|
+| Host UART receive | GPIO34 (`RX2`) | ODROID-C4 pin 32 (`UART_EE_C` TX) | Firmware |
+| Host UART transmit | GPIO23 (`TX2`) | ODROID-C4 pin 26 (`UART_EE_C` RX) | Firmware |
+| Host UART reference | GND | ODROID-C4 pin 6 GND | Firmware |
+| Left encoder A | GPIO25 | Left motor encoder A | Firmware |
+| Left encoder B | GPIO26 | Left motor encoder B | Firmware |
+| Right encoder A | GPIO35 | Right motor encoder A; external pull-up required | Firmware |
+| Right encoder B | GPIO33 | Right motor encoder B | Firmware |
+| IMU I²C data | GPIO21 (`SDA`) | MPU6050 SDA | Firmware |
+| IMU I²C clock | GPIO22 (`SCL`) | MPU6050 SCL | Firmware |
+| Left motor PWM | GPIO14 | TB6612FNG `PWMA` | Firmware |
+| Left motor direction 1 | GPIO18 | TB6612FNG `AIN1` | Firmware |
+| Left motor direction 2 | GPIO19 | TB6612FNG `AIN2` | Firmware |
+| Right motor PWM | GPIO27 | TB6612FNG `PWMB` | Firmware |
+| Right motor direction 1 | GPIO16 | TB6612FNG `BIN1` | Firmware |
+| Right motor direction 2 | GPIO17 | TB6612FNG `BIN2` | Firmware |
+| Hardware motor standby | GPIO32 | TB6612FNG `STBY`; LOW is motor stop | Firmware |
+
+### Power and interface boundaries
+
+| Domain | Source and destination | Status |
+|---|---|---|
+| Propulsion/control power | 2S 18650, 5000 mAh pack → TB6612FNG motor supply and ESP32 expansion-board DC input | User-confirmed topology; verify polarity, fuse/cutoff, carrier input range, and logic-voltage jumper at the robot |
+| Compute power | 5 V, 5000 mAh power bank → ODROID-C4 | User-confirmed topology; verify cable and input-current rating |
+| LiDAR | ODROID-C4 USB host → YDLidar X3 power and data | Deployed ROS configuration |
+| Signal reference | ODROID, ESP32, motor driver, sensors, and both supplies share GND | Required for UART and GPIO; keep motor current return separate from sensitive signal wiring |
+
+GPIO1 and GPIO3 are reserved for USB flashing and serial monitoring. Do not
+apply the 2S positive rail to the ODROID, GPIO pins, or a logic-voltage rail.
+Verify physical polarity and continuity before energizing the robot.
 
 ## Command and safety path
 
