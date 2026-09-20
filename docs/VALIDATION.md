@@ -57,9 +57,9 @@ or sensor changes.
 
 ## Known limitations
 
-- The Drive Supervisor remains experimental because its caster compensation
-  previously distorted SLAM. Mapping and localization default to direct relay
-  mode; validate Supervisor changes separately.
+- The Drive Supervisor is deprecated/experimental because its caster
+  compensation previously distorted SLAM. Base, mapping, and localization
+  default to direct relay mode. Do not enable it during normal operation.
 - A loose wheel hub invalidated one mapping run even though encoder telemetry
   remained healthy. Encoders are upstream of the wheel-to-shaft interface, so
   physical witness marks and hub inspection remain necessary.

@@ -58,10 +58,10 @@ def generate_launch_description():
             'enable_motors', default_value='false',
             description='Unlock cmd_vel only during an attended floor test.'),
         DeclareLaunchArgument(
-            'enable_drive_supervisor', default_value='true',
+            'enable_drive_supervisor', default_value='false',
             description=(
-                'Use caster-aware command supervision. Disable only for '
-                'an attended direct-control diagnostic.')),
+                'DEPRECATED/EXPERIMENTAL caster supervisor. Mapping uses '
+                'cmd_vel_passthrough by default.')),
         base_launch,
         # Bring up the base TF/odometry chain before scans, then start SLAM
         # only after the laser has begun publishing.  This prevents the

@@ -25,6 +25,9 @@ def quaternion_yaw(quaternion):
 class DriveSupervisor(Node):
     def __init__(self):
         super().__init__('drive_supervisor')
+        self.get_logger().warning(
+            'Drive Supervisor is deprecated/experimental and is not part of '
+            'the validated mapping or localization command path.')
         defaults = {
             'input_timeout': 0.25,
             'control_rate': 20.0,

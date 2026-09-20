@@ -19,10 +19,11 @@ def generate_launch_description():
             'enable_motors', default_value='false',
             description='Allow cmd_vel to drive motors. Keep false until floor test.'),
         DeclareLaunchArgument(
-            'enable_drive_supervisor', default_value='true',
+            'enable_drive_supervisor', default_value='false',
             description=(
-                'Run the caster-aware /cmd_vel to /cmd_vel_safe supervisor. '
-                'Disable only for an attended direct-control diagnostic.')),
+                'DEPRECATED/EXPERIMENTAL caster supervisor. The supported '
+                'default path uses cmd_vel_passthrough. Enable only for an '
+                'explicit, attended regression test.')),
         DeclareLaunchArgument(
             'publish_sensor_tf', default_value='true',
             description='Publish measured base, IMU, and LiDAR static transforms.'),

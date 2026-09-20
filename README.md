@@ -20,11 +20,11 @@ ground pin to ESP32 ground. The ROS bridge opens `/dev/ttyAML6` at 115200 baud.
 ESP32 power is supplied separately; its USB cable is only connected temporarily
 to flash firmware.
 The ROS bridge publishes `/imu/data_raw`, `/wheel/odometry`, `/joint_states`,
-and `/diagnostics`. Normal commands follow the guarded path
-`/cmd_vel -> drive_supervisor -> /cmd_vel_safe -> serial_bridge -> ESP32`.
-When the supervisor is explicitly disabled for an attended diagnostic, the
-launch file starts `cmd_vel_passthrough` instead. These publishers are mutually
-exclusive so exactly one command source owns `/cmd_vel_safe`.
+and `/diagnostics`. The supported command path is
+`/cmd_vel -> cmd_vel_passthrough -> /cmd_vel_safe -> serial_bridge -> ESP32`.
+The deprecated/experimental Drive Supervisor can explicitly replace the relay
+for an attended regression test. These publishers are mutually exclusive so
+exactly one command source owns `/cmd_vel_safe`.
 
 The UART link uses a fixed 44-byte binary frame with CRC-16. The ESP32 build
 uses a 40 MHz flash clock because repeated bootloader checksum failures were
@@ -137,8 +137,8 @@ Set the initial pose in the `map` frame before expecting `/amcl_pose` or the
 `map -> odom` transform. Only after diagnostics report no MCU or host fault,
 the scan overlaps the saved map, the floor is clear, and the physical motor
 cutoff is within reach, repeat the launch with `enable_motors:=true` for an
-attended motion test. Keep `enable_drive_supervisor:=false` until its separate
-floor-SLAM validation is complete.
+attended motion test. The deprecated Drive Supervisor is outside the supported
+mapping/localization path and must remain disabled for normal operation.
 
 ## Keyboard floor station
 

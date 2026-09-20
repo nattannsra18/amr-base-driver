@@ -1,3 +1,5 @@
+# DEPRECATED/EXPERIMENTAL: retained only for explicit regression testing.
+# Normal base, mapping, and localization launches use cmd_vel_passthrough.
 drive_supervisor:
   ros__parameters:
     input_timeout: 0.25
