@@ -1,0 +1,42 @@
+drive_supervisor:
+  ros__parameters:
+    input_timeout: 0.25
+    control_rate: 20.0
+
+    # Gentle acceleration for mapping; explicit zero remains an immediate stop.
+    linear_accel: 0.20
+    linear_decel: 0.45
+    angular_accel: 0.8
+
+    # A passive caster needs motion to swivel.  After startup or a direction
+    # reversal, creep 12 cm, stop, and accept the settled yaw as the new
+    # straight reference.  Do not force a return to the pre-alignment yaw.
+    align_speed: 0.08
+    align_distance: 0.12
+    align_timeout: 2.5
+    stop_timeout: 0.35
+
+    # Only a small trim is allowed while the caster is physically swivelling.
+    heading_kp: 0.35
+    heading_max: 0.05
+    heading_min: 0.0
+    align_heading_max: 0.03
+    heading_tolerance_deg: 1.5
+
+    # On the first linear motion after node startup the caster direction is
+    # unknown, so perform the same bounded alignment sequence once.
+    initial_alignment: true
+
+    # Hold EKF heading only for a truly straight command.  Any intentional
+    # angular command from keyboard/Nav2 passes through and resets the target.
+    # EKF yaw provides the angle reference.  Filtered EKF yaw rate (whose fast
+    # component comes from MPU6050 gyro Z) damps rotation.  Blend this hold in
+    # for one second after each new reference to avoid a correction step.
+    straight_heading_kp: 0.35
+    straight_heading_kd: 0.12
+    straight_heading_max: 0.05
+    straight_heading_tolerance_deg: 1.2
+    straight_angular_deadband: 0.01
+    heading_hold_ramp_time: 1.0
+    yaw_rate_filter_tau: 0.25
+    odom_timeout: 0.35

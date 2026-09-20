@@ -1,0 +1,18 @@
+amr_base_serial_bridge:
+  ros__parameters:
+    port: /dev/ttyAML6
+    baud: 115200
+    left_cpr: 2362.4
+    right_cpr: 2367.0
+    # Loaded-floor calibration: 1.94 m actual / 1.9651 m encoder odometry.
+    wheel_radius: 0.032085
+    # Loaded-floor turn calibration: 355.86 deg odom / 350 deg actual.
+    wheel_separation: 0.36094
+    # Corrects the stationary magnitude observed near 1.067 g.
+    accel_scale: 0.9372
+    max_rpm: 90.0
+    cmd_vel_timeout: 0.25
+    enable_motors: false
+    odom_frame: odom
+    base_frame: base_footprint
+    imu_frame: imu_link

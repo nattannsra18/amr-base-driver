@@ -1,0 +1,4 @@
+# Stable names for two CP2102 devices that expose the same serial number.
+# ESP32 is connected to ODROID USB topology 1.4; YDLidar X3 to 1.1.
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="10c4", ENV{ID_MODEL_ID}=="ea60", ENV{ID_PATH}=="platform-xhci-hcd.0.auto-usb-0:1.4:1.0", SYMLINK+="robot-esp32", GROUP="dialout", MODE="0660"
+SUBSYSTEM=="tty", ENV{ID_VENDOR_ID}=="10c4", ENV{ID_MODEL_ID}=="ea60", ENV{ID_PATH}=="platform-xhci-hcd.0.auto-usb-0:1.1:1.0", SYMLINK+="robot-lidar", GROUP="dialout", MODE="0660"
