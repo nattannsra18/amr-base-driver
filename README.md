@@ -95,6 +95,20 @@ hard real-time wheel loop and stops PWM if commands expire. Mapping and
 localization consume the same conditioned scan and EKF odometry but are run as
 separate operating modes.
 
+## Power distribution and physical pinout
+
+![Physical AMR power distribution and controller pinout](docs/assets/system-power-pinout.svg)
+
+The robot uses two positive power domains: a 2S 18650 pack for propulsion and
+the ESP32 expansion board, and a separate 5 V power bank for the ODROID-C4 and
+USB LiDAR. Their positive rails are not tied together. A common signal ground
+is still required between the ODROID, ESP32, sensors, and motor driver so UART
+and GPIO levels have the same reference.
+
+The SVG is derived from the GPIO constants in the deployed firmware. Verify
+battery polarity, the expansion-board voltage jumper, carrier input rating,
+and ground continuity against the physical robot before energizing it.
+
 ## Command and safety path
 
 Exactly one node is allowed to publish `/cmd_vel_safe`. Direct passthrough is

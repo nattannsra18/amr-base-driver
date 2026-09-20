@@ -1,0 +1,288 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1220"
+     viewBox="0 0 1800 1220" role="img"
+     aria-labelledby="title description">
+  <title id="title">Physical AMR power distribution and controller pinout</title>
+  <desc id="description">
+    Two-source power architecture for the ODROID-C4 robot. A 2S 18650 pack
+    powers the ESP32 expansion board and TB6612FNG motor driver. A separate
+    power bank powers the ODROID-C4 and its USB LiDAR. UART, I2C, encoders,
+    motor-control GPIO, and the required common signal ground are labelled.
+  </desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fafc"/>
+      <stop offset="1" stop-color="#eef2f7"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="7"
+                    flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <marker id="arrow-power-a" markerWidth="11" markerHeight="11"
+            refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#e8590c"/>
+    </marker>
+    <marker id="arrow-power-b" markerWidth="11" markerHeight="11"
+            refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrow-signal" markerWidth="11" markerHeight="11"
+            refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#059669"/>
+    </marker>
+    <marker id="arrow-uart" markerWidth="11" markerHeight="11"
+            refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#0891b2"/>
+    </marker>
+    <marker id="arrow-i2c" markerWidth="11" markerHeight="11"
+            refX="9" refY="5.5" orient="auto">
+      <path d="M0,0 L11,5.5 L0,11 Z" fill="#7c3aed"/>
+    </marker>
+    <style>
+      .title { font: 700 38px Inter,Segoe UI,Arial,sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 17px Inter,Segoe UI,Arial,sans-serif; fill: #475569; }
+      .domain-title { font: 700 20px Inter,Segoe UI,Arial,sans-serif; }
+      .box-title { font: 700 21px Inter,Segoe UI,Arial,sans-serif; fill: #0f172a; }
+      .box-subtitle { font: 600 15px Inter,Segoe UI,Arial,sans-serif; fill: #334155; }
+      .body { font: 400 14px Inter,Segoe UI,Arial,sans-serif; fill: #475569; }
+      .small { font: 500 12px Inter,Segoe UI,Arial,sans-serif; fill: #475569; }
+      .pin-head { font: 700 15px ui-monospace,SFMono-Regular,Consolas,monospace; fill: #0f172a; }
+      .pin { font: 500 13px ui-monospace,SFMono-Regular,Consolas,monospace; fill: #334155; }
+      .label { font: 700 13px Inter,Segoe UI,Arial,sans-serif; paint-order: stroke;
+               stroke: #f8fafc; stroke-width: 5px; stroke-linejoin: round; }
+      .card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 2; filter: url(#shadow); }
+      .inner { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; }
+      .power-a { fill: none; stroke: #e8590c; stroke-width: 6;
+                 marker-end: url(#arrow-power-a); }
+      .power-b { fill: none; stroke: #2563eb; stroke-width: 6;
+                 marker-end: url(#arrow-power-b); }
+      .signal { fill: none; stroke: #059669; stroke-width: 4;
+                marker-end: url(#arrow-signal); }
+      .signal-bi { fill: none; stroke: #059669; stroke-width: 4; }
+      .uart { fill: none; stroke: #0891b2; stroke-width: 4;
+              marker-end: url(#arrow-uart); }
+      .i2c { fill: none; stroke: #7c3aed; stroke-width: 4;
+             marker-end: url(#arrow-i2c); }
+      .ground { fill: none; stroke: #475569; stroke-width: 4;
+                stroke-dasharray: 11 8; }
+      .motor { fill: none; stroke: #d97706; stroke-width: 5;
+               marker-end: url(#arrow-power-a); }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1220" fill="url(#background)"/>
+  <rect x="42" y="35" width="1716" height="1150" rx="28"
+        fill="none" stroke="#cbd5e1" stroke-width="2"/>
+
+  <text x="80" y="92" class="title">Physical AMR · Power Distribution &amp; Pinout</text>
+  <text x="80" y="124" class="subtitle">
+    As-built controller wiring derived from the deployed ESP32 firmware · Rev A · 2026-09-20
+  </text>
+
+  <!-- Domain backgrounds -->
+  <rect x="70" y="158" width="1660" height="360" rx="24"
+        fill="#fff7ed" stroke="#fdba74" stroke-width="2"/>
+  <text x="98" y="194" class="domain-title" fill="#c2410c">
+    POWER DOMAIN A · PROPULSION &amp; REAL-TIME CONTROL
+  </text>
+
+  <rect x="70" y="548" width="1660" height="250" rx="24"
+        fill="#eff6ff" stroke="#93c5fd" stroke-width="2"/>
+  <text x="98" y="584" class="domain-title" fill="#1d4ed8">
+    POWER DOMAIN B · COMPUTE &amp; LIDAR
+  </text>
+
+  <!-- Domain A blocks -->
+  <g transform="translate(100 230)">
+    <rect width="250" height="190" rx="18" class="card"/>
+    <rect x="18" y="18" width="54" height="110" rx="9"
+          fill="#f97316" stroke="#9a3412" stroke-width="2"/>
+    <rect x="82" y="18" width="54" height="110" rx="9"
+          fill="#f97316" stroke="#9a3412" stroke-width="2"/>
+    <rect x="36" y="5" width="18" height="14" rx="3" fill="#64748b"/>
+    <rect x="100" y="5" width="18" height="14" rx="3" fill="#64748b"/>
+    <text x="154" y="49" class="box-title">2S 18650</text>
+    <text x="154" y="75" class="box-subtitle">5000 mAh pack</text>
+    <text x="154" y="105" class="body">7.4 V nominal</text>
+    <text x="154" y="127" class="body">8.4 V fully charged</text>
+    <text x="24" y="163" class="small">Use a protected pack / 2S BMS</text>
+  </g>
+
+  <g transform="translate(420 253)">
+    <rect width="230" height="145" rx="18" class="card"/>
+    <path d="M28 49 H68 M68 28 V70 M68 49 H105"
+          stroke="#e8590c" stroke-width="7" fill="none"/>
+    <circle cx="135" cy="49" r="17" fill="none"
+            stroke="#e8590c" stroke-width="5"/>
+    <path d="M152 49 H190" stroke="#e8590c" stroke-width="7"/>
+    <text x="24" y="101" class="box-title">Protection</text>
+    <text x="24" y="125" class="body">3 A fuse + motor cutoff</text>
+  </g>
+
+  <g transform="translate(735 215)">
+    <rect width="390" height="235" rx="18" class="card"/>
+    <text x="24" y="38" class="box-title">ESP32 expansion board</text>
+    <text x="24" y="64" class="box-subtitle">38-pin carrier + 28-pin ESP32 module</text>
+    <rect x="30" y="86" width="330" height="105" rx="12"
+          fill="#faf5ff" stroke="#a855f7" stroke-width="2"/>
+    <text x="52" y="119" class="box-title">ESP32-WROOM controller</text>
+    <text x="52" y="146" class="body">Closed-loop wheel PI · IMU · encoders</text>
+    <text x="52" y="170" class="body">UART2 telemetry · 300 ms watchdog</text>
+    <text x="24" y="219" class="small">
+      Feed 2S only to the carrier input rated DC 6.5–16 V
+    </text>
+  </g>
+
+  <g transform="translate(1225 215)">
+    <rect width="275" height="235" rx="18" class="card"/>
+    <text x="24" y="38" class="box-title">TB6612FNG</text>
+    <text x="24" y="64" class="box-subtitle">Dual motor driver</text>
+    <rect x="28" y="88" width="219" height="62" rx="10" class="inner"/>
+    <text x="46" y="114" class="body">VM: 2S propulsion rail</text>
+    <text x="46" y="137" class="body">VCC: logic rail from carrier</text>
+    <text x="24" y="181" class="body">PWMA/B · AIN/BIN · STBY</text>
+    <text x="24" y="207" class="small">100 nF + bulk decoupling near VM</text>
+  </g>
+
+  <g transform="translate(1565 215)">
+    <rect width="130" height="235" rx="18" class="card"/>
+    <circle cx="65" cy="70" r="37" fill="#f1f5f9"
+            stroke="#64748b" stroke-width="5"/>
+    <path d="M52 47 V93 M78 47 V93 M42 70 H88"
+          stroke="#64748b" stroke-width="4"/>
+    <text x="65" y="132" text-anchor="middle" class="box-title">TT motors</text>
+    <text x="65" y="160" text-anchor="middle" class="body">Left + right</text>
+    <text x="65" y="189" text-anchor="middle" class="small">Motor power</text>
+    <text x="65" y="208" text-anchor="middle" class="small">from VM only</text>
+  </g>
+
+  <!-- Domain A power and control paths -->
+  <path d="M350 325 H420" class="power-a"/>
+  <path d="M650 325 H692 V280 H735" class="power-a"/>
+  <path d="M650 325 H1168 V280 H1225" class="power-a"/>
+  <path d="M1125 385 H1165 V390 H1225" class="signal"/>
+  <path d="M1500 335 H1565" class="motor"/>
+  <text x="367" y="308" class="label" fill="#c2410c">2S</text>
+  <text x="667" y="306" class="label" fill="#c2410c">fused + switched</text>
+  <text x="1138" y="372" class="label" fill="#047857">GPIO</text>
+
+  <!-- Domain B blocks -->
+  <g transform="translate(105 620)">
+    <rect width="260" height="130" rx="18" class="card"/>
+    <rect x="24" y="31" width="56" height="68" rx="9"
+          fill="#3b82f6" stroke="#1d4ed8" stroke-width="2"/>
+    <rect x="43" y="20" width="18" height="11" rx="2" fill="#64748b"/>
+    <text x="100" y="48" class="box-title">Power bank</text>
+    <text x="100" y="74" class="box-subtitle">5000 mAh</text>
+    <text x="100" y="100" class="body">Dedicated 5 V compute rail</text>
+  </g>
+
+  <g transform="translate(500 605)">
+    <rect width="350" height="160" rx="18" class="card"/>
+    <text x="26" y="42" class="box-title">ODROID-C4</text>
+    <text x="26" y="70" class="box-subtitle">Ubuntu 24.04 · ROS 2 Jazzy</text>
+    <text x="26" y="103" class="body">UART_EE_C · 115200 baud</text>
+    <text x="26" y="127" class="body">USB host for YDLidar X3</text>
+    <text x="26" y="150" class="small">Power input: verify 5 V cable/current rating</text>
+  </g>
+
+  <g transform="translate(1030 605)">
+    <rect width="300" height="160" rx="18" class="card"/>
+    <circle cx="73" cy="78" r="42" fill="#e0f2fe"
+            stroke="#0284c7" stroke-width="4"/>
+    <path d="M73 36 V120 M31 78 H115"
+          stroke="#0284c7" stroke-width="2" opacity="0.55"/>
+    <text x="137" y="57" class="box-title">YDLidar X3</text>
+    <text x="137" y="86" class="body">USB power + data</text>
+    <text x="137" y="111" class="body">/scan_raw</text>
+  </g>
+
+  <g transform="translate(1430 575)">
+    <rect width="265" height="90" rx="16" class="card"/>
+    <text x="22" y="35" class="box-title">Wheel encoders</text>
+    <text x="22" y="62" class="body">Left A/B · Right A/B</text>
+  </g>
+
+  <g transform="translate(1430 690)">
+    <rect width="265" height="90" rx="16" class="card"/>
+    <text x="22" y="35" class="box-title">MPU6050</text>
+    <text x="22" y="62" class="body">I²C accelerometer + gyro</text>
+  </g>
+
+  <!-- Domain B and signal paths -->
+  <path d="M365 685 H500" class="power-b"/>
+  <path d="M850 685 H1030" class="power-b"/>
+  <text x="393" y="669" class="label" fill="#1d4ed8">5 V</text>
+  <text x="887" y="669" class="label" fill="#1d4ed8">USB power + data</text>
+
+  <path d="M675 605 V500 H930 V450" class="uart"/>
+  <path d="M930 450 V500 H700 V605" class="uart"/>
+  <text x="729" y="489" class="label" fill="#0e7490">
+    UART2 · crossed TX/RX
+  </text>
+
+  <path d="M1430 620 H1365 V480 H1015 V450" class="signal"/>
+  <path d="M1430 735 H1388 V505 H1048 V450" class="i2c"/>
+  <text x="1178" y="469" class="label" fill="#047857">encoder A/B</text>
+  <text x="1188" y="528" class="label" fill="#6d28d9">I²C SDA/SCL</text>
+
+  <!-- Common ground -->
+  <path d="M170 500 V820 H1630" class="ground"/>
+  <path d="M555 398 V820 M930 450 V820 M1360 450 V820
+           M675 765 V820 M1180 765 V820 M1560 665 V820 M1560 780 V820"
+        class="ground"/>
+  <text x="735" y="811" class="label" fill="#334155">
+    COMMON SIGNAL GROUND · required for UART and control references
+  </text>
+  <text x="122" y="537" class="small">
+    Positive power rails remain separate; grounds share a signal reference.
+  </text>
+
+  <!-- Pinout table -->
+  <rect x="70" y="850" width="1660" height="270" rx="22" class="card"/>
+  <text x="100" y="890" class="box-title">Confirmed ESP32 GPIO assignment</text>
+  <text x="100" y="916" class="body">
+    Source of truth: robot_base_tb6612_mapping_v3_floor_start.ino
+  </text>
+
+  <line x1="650" y1="875" x2="650" y2="1087" stroke="#cbd5e1" stroke-width="2"/>
+  <line x1="1190" y1="875" x2="1190" y2="1087" stroke="#cbd5e1" stroke-width="2"/>
+
+  <text x="100" y="958" class="pin-head">MOTOR DRIVER · TB6612FNG</text>
+  <text x="100" y="988" class="pin">Left:  PWMA GPIO14 · AIN1 GPIO18 · AIN2 GPIO19</text>
+  <text x="100" y="1017" class="pin">Right: PWMB GPIO27 · BIN1 GPIO16 · BIN2 GPIO17</text>
+  <text x="100" y="1046" class="pin">STBY: GPIO32 · hardware stop when LOW</text>
+  <text x="100" y="1075" class="pin">VM: fused 2S rail · VCC: verified logic rail</text>
+
+  <text x="685" y="958" class="pin-head">SENSORS</text>
+  <text x="685" y="988" class="pin">Left encoder:  A GPIO25 · B GPIO26</text>
+  <text x="685" y="1017" class="pin">Right encoder: A GPIO35 · B GPIO33</text>
+  <text x="685" y="1046" class="pin">GPIO35 requires an external pull-up</text>
+  <text x="685" y="1075" class="pin">MPU6050: SDA GPIO21 · SCL GPIO22</text>
+
+  <text x="1225" y="958" class="pin-head">ODROID UART_EE_C ↔ ESP32 UART2</text>
+  <text x="1225" y="988" class="pin">ODROID pin 32 TX → ESP32 GPIO34 RX2</text>
+  <text x="1225" y="1017" class="pin">ODROID pin 26 RX ← ESP32 GPIO23 TX2</text>
+  <text x="1225" y="1046" class="pin">ODROID GND ↔ ESP32 GND</text>
+  <text x="1225" y="1075" class="pin">GPIO1/GPIO3 reserved for USB flashing</text>
+
+  <!-- Legend and warning -->
+  <g transform="translate(90 1150)">
+    <line x1="0" y1="0" x2="42" y2="0" stroke="#e8590c" stroke-width="6"/>
+    <text x="52" y="5" class="small">2S propulsion/control power</text>
+    <line x1="270" y1="0" x2="312" y2="0" stroke="#2563eb" stroke-width="6"/>
+    <text x="322" y="5" class="small">5 V compute/USB power</text>
+    <line x1="520" y1="0" x2="562" y2="0" stroke="#059669" stroke-width="4"/>
+    <text x="572" y="5" class="small">GPIO / encoder</text>
+    <line x1="735" y1="0" x2="777" y2="0" stroke="#0891b2" stroke-width="4"/>
+    <text x="787" y="5" class="small">UART</text>
+    <line x1="870" y1="0" x2="912" y2="0" stroke="#7c3aed" stroke-width="4"/>
+    <text x="922" y="5" class="small">I²C</text>
+    <line x1="1020" y1="0" x2="1062" y2="0" stroke="#475569"
+          stroke-width="4" stroke-dasharray="10 7"/>
+    <text x="1072" y="5" class="small">Common ground</text>
+  </g>
+  <text x="1710" y="1155" text-anchor="end" class="small" fill="#b91c1c">
+    VERIFY POLARITY, JUMPER VOLTAGE, AND GROUND BEFORE ENERGIZING
+  </text>
+</svg>
