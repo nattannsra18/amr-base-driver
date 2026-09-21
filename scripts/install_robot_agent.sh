@@ -67,16 +67,28 @@ done
 [[ -f "$PACKAGE_ROOT/package.xml" ]] || fail "Vendored amr_web_bridge package was not found"
 command -v colcon >/dev/null || fail "colcon is required"
 command -v systemctl >/dev/null || fail "systemctl is required"
+command -v setfacl >/dev/null || fail "setfacl is required (install the acl package)"
 if ! bash -c "source '/opt/ros/$ROS_DISTRO_NAME/setup.bash' && python3 -c 'import websockets, yaml'"; then
   fail "Python packages websockets and yaml are required by the Agent"
 fi
-for ROS_PACKAGE in ament_index_python action_msgs diagnostic_msgs geometry_msgs lifecycle_msgs nav2_msgs nav_msgs rclpy std_srvs tf2_ros; do
+for ROS_PACKAGE in ament_index_python action_msgs diagnostic_msgs geometry_msgs lifecycle_msgs nav2_msgs nav_msgs rclpy rmw_fastrtps_cpp std_srvs tf2_ros; do
   bash -c "source '/opt/ros/$ROS_DISTRO_NAME/setup.bash' && ros2 pkg prefix '$ROS_PACKAGE' >/dev/null 2>&1" || fail "Required ROS package is unavailable: $ROS_PACKAGE"
 done
 for required_key in robot_serial_number profile_version agent_capabilities; do
   grep -Eq "^[[:space:]]*$required_key:[[:space:]]*[^[:space:]]+" "$PROFILE_FILE" || fail "Profile must define $required_key"
 done
 grep -Eq 'REPLACE-|CHANGE-ME|CHANGEME' "$PROFILE_FILE" && fail "Profile still contains a placeholder value" || true
+MAPS_DIRECTORY="$(python3 - "$PROFILE_FILE" <<'PY'
+import sys
+import yaml
+
+with open(sys.argv[1], encoding="utf-8") as profile_file:
+    profile = yaml.safe_load(profile_file) or {}
+parameters = profile.get("amr_web_bridge", {}).get("ros__parameters", {})
+print(parameters.get("maps_directory", ""))
+PY
+)"
+[[ "$MAPS_DIRECTORY" == /* && -d "$MAPS_DIRECTORY" ]] || fail "Profile maps_directory must be an existing absolute directory"
 
 if [[ -n "$TOKEN_FILE" ]]; then
   [[ -r "$TOKEN_FILE" ]] || fail "Enrollment token file is not readable"
@@ -115,6 +127,17 @@ run install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0700 "$STATE_DIR"
 run install -d -o root -g "$SERVICE_USER" -m 0750 "$CONFIG_DIR"
 run install -o root -g "$SERVICE_USER" -m 0640 "$PROFILE_FILE" "$CONFIG_DIR/robot-agent.yaml"
 
+# The isolated Agent must traverse the map path and must be able to maintain
+# map YAML, image, and metadata files. ACLs keep that access limited to the
+# service account without opening the robot operator's home directory.
+MAP_PARENT="$(dirname -- "$MAPS_DIRECTORY")"
+while [[ "$MAP_PARENT" != "/" ]]; do
+  run setfacl -m "u:$SERVICE_USER:x" "$MAP_PARENT"
+  MAP_PARENT="$(dirname -- "$MAP_PARENT")"
+done
+run setfacl -R -m "u:$SERVICE_USER:rwX" "$MAPS_DIRECTORY"
+run setfacl -m "d:u:$SERVICE_USER:rwX" "$MAPS_DIRECTORY"
+
 ENVIRONMENT_TMP="$BUILD_DIR/agent.env"
 {
   printf 'ROBOT_CONTROL_URL=%s\n' "$CONTROL_URL"
@@ -122,7 +145,9 @@ ENVIRONMENT_TMP="$BUILD_DIR/agent.env"
   printf 'ROBOT_PROFILE_FILE=%s/robot-agent.yaml\n' "$CONFIG_DIR"
   printf 'ROBOT_CREDENTIAL_FILE=%s/agent-credential.json\n' "$STATE_DIR"
   printf 'ROBOT_ENROLLMENT_TOKEN=%s\n' "$ENROLLMENT_TOKEN"
-  printf 'ROS_DISTRO=%s\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nROS_DOMAIN_ID=0\n' "$ROS_DISTRO_NAME"
+  # Match the physical ROS stack's Fast DDS implementation. UDP-only transport
+  # avoids cross-user shared-memory permissions while preserving ROS services.
+  printf 'ROS_DISTRO=%s\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\nROS_DOMAIN_ID=0\n' "$ROS_DISTRO_NAME"
 } > "$ENVIRONMENT_TMP"
 chmod 0600 "$ENVIRONMENT_TMP"
 run install -o root -g "$SERVICE_USER" -m 0640 "$ENVIRONMENT_TMP" "$CONFIG_DIR/agent.env"

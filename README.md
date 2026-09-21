@@ -114,6 +114,12 @@ ros2 run amr_web_bridge web_bridge_node --ros-args \
   -p server_url:=wss://control.example.com
 ```
 
+The systemd Agent uses the same Fast DDS implementation as the physical ROS
+stack with UDP-only transport. This lets the restricted service user receive
+topics and call lifecycle services without depending on cross-user shared
+memory. The installer also grants that account a narrow ACL for the configured
+map directory so map catalogs and map-management operations remain available.
+
 For ODROID service installation, use the included installer. It builds a
 relocatable Agent workspace, installs the profile and credentials with limited
 permissions, then enables `indoor-delivery-robot-agent.service`. Verify the
