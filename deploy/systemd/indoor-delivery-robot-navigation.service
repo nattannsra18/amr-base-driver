@@ -1,0 +1,25 @@
+[Unit]
+Description=Indoor Delivery Robot Navigation Stack
+Documentation=https://github.com/nattannsra18/amr-base-driver
+After=network-online.target systemd-udev-settle.service
+Wants=network-online.target systemd-udev-settle.service
+Before=indoor-delivery-robot-agent.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=odroid
+Group=odroid
+SupplementaryGroups=dialout
+WorkingDirectory=/home/odroid/amr_ws
+EnvironmentFile=/etc/indoor-delivery-robot/navigation.env
+ExecStartPre=/usr/bin/test -c /dev/ttyAML6
+ExecStartPre=/usr/bin/test -e /dev/robot-lidar
+ExecStart=/usr/bin/bash -lc 'source "/opt/ros/$ROS_DISTRO/setup.bash" && source "$AMR_WORKSPACE/install/setup.bash" && exec ros2 launch amr_base_driver navigation.launch.py map_yaml:="$AMR_MAP_FILE" enable_motors:="$AMR_ENABLE_MOTORS" activate_after_initial_pose:=true'
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target
