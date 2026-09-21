@@ -71,7 +71,10 @@ trap cleanup EXIT
   printf 'AMR_WORKSPACE=%s\n' "$WORKSPACE"
   printf 'AMR_MAP_FILE=%s\n' "$MAP_FILE"
   printf 'AMR_ENABLE_MOTORS=%s\n' "$ENABLE_MOTORS"
-  printf 'ROS_DOMAIN_ID=0\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\n'
+  # Keep every robot-side ROS process on the same transport. The Agent runs as
+  # a separate service account, so UDP avoids Fast DDS shared-memory permission
+  # boundaries while preserving lifecycle service discovery.
+  printf 'ROS_DOMAIN_ID=0\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\n'
 } > "$ENV_FILE"
 
 info "Installing the navigation boot service"

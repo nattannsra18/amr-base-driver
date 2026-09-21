@@ -37,6 +37,8 @@ class MappingRuntime:
         self._detail: str | None = None
         self._started_at: str | None = None
         self._saved_map_id: str | None = None
+        self._navigation_was_active = False
+        self._localization_was_active = False
 
     def snapshot(self, map_revision: int) -> dict[str, Any]:
         with self._lock:
@@ -80,6 +82,37 @@ class MappingRuntime:
         if 'success=True' not in output and 'success: true' not in output.lower():
             raise RuntimeError(f'{manager} did not confirm the lifecycle transition')
 
+    def _lifecycle_node_active(self, node: str) -> bool:
+        output = self._ros(['lifecycle', 'get', f'/{node}'])
+        return output.strip().lower().startswith('active ')
+
+    def _ensure_lifecycle_started(
+        self,
+        manager: str,
+        node: str,
+        *,
+        attempts: int = 3,
+    ) -> None:
+        """Start a lifecycle manager, tolerating a lost service response."""
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                self._lifecycle(manager, 2)
+                return
+            except Exception as error:
+                last_error = error
+                try:
+                    if self._lifecycle_node_active(node):
+                        return
+                except Exception as state_error:
+                    last_error = state_error
+                if attempt + 1 < attempts:
+                    self._sleep(1.0)
+        raise RuntimeError(
+            f'{manager} failed to restore {node} after {attempts} attempts: '
+            f'{last_error}'
+        ) from last_error
+
     def start(self, session_id: str) -> None:
         with self._lock:
             if self._phase not in {'IDLE', 'FAILED'}:
@@ -92,17 +125,24 @@ class MappingRuntime:
         navigation_paused = False
         localization_paused = False
         try:
-            self._lifecycle('lifecycle_manager_navigation', 1)
-            navigation_paused = True
-            self._lifecycle('lifecycle_manager_localization', 1)
-            localization_paused = True
+            navigation_active = self._lifecycle_node_active('planner_server')
+            localization_active = self._lifecycle_node_active('amcl')
+            with self._lock:
+                self._navigation_was_active = navigation_active
+                self._localization_was_active = localization_active
+            if navigation_active:
+                self._lifecycle('lifecycle_manager_navigation', 1)
+                navigation_paused = True
+            if localization_active:
+                self._lifecycle('lifecycle_manager_localization', 1)
+                localization_paused = True
             launch_arguments = [
                 # Synchronous scan processing avoids an optimization backlog
                 # while the robot is driven interactively from the web UI.
                 # That backlog can make the live map appear warped even when
                 # the final saved graph is optimized correctly.
                 'ros2', 'launch', 'slam_toolbox', 'online_sync_launch.py',
-                'use_sim_time:=true', 'autostart:=true',
+                'use_sim_time:=false', 'autostart:=true',
             ]
             if self.slam_params_file:
                 launch_arguments.append(
@@ -121,12 +161,18 @@ class MappingRuntime:
                 self._process = process
                 self._phase = 'MAPPING'
                 self._detail = 'SLAM Toolbox is building a live occupancy map'
-        except Exception:
+        except Exception as error:
             if localization_paused:
                 self._safe_lifecycle('lifecycle_manager_localization', 2)
             if navigation_paused:
                 self._safe_lifecycle('lifecycle_manager_navigation', 2)
-            self._set('FAILED', 'Unable to enter ROS mapping mode')
+            with self._lock:
+                self._localization_was_active = False
+                self._navigation_was_active = False
+            self._set(
+                'FAILED',
+                f'Unable to enter ROS mapping mode: {error}',
+            )
             raise
 
     def stop_capture(self) -> None:
@@ -194,7 +240,11 @@ class MappingRuntime:
                 raise ValueError('No mapping session can be discarded')
             self._phase = 'RESTORING'
             self._detail = 'Restoring Nav2 localization'
-        self._restore()
+        try:
+            self._restore()
+        except Exception as error:
+            self._set('FAILED', f'Unable to restore Nav2 localization: {error}')
+            raise
         with self._lock:
             self._session_id = None
             self._started_at = None
@@ -206,6 +256,8 @@ class MappingRuntime:
         with self._lock:
             process = self._process
             self._process = None
+            localization_was_active = self._localization_was_active
+            navigation_was_active = self._navigation_was_active
         if process is not None and process.poll() is None:
             try:
                 os.killpg(process.pid, signal.SIGINT)
@@ -214,8 +266,18 @@ class MappingRuntime:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGTERM)
                     process.wait(timeout=5.0)
-        self._lifecycle('lifecycle_manager_localization', 2)
-        self._lifecycle('lifecycle_manager_navigation', 2)
+        if localization_was_active:
+            self._ensure_lifecycle_started(
+                'lifecycle_manager_localization', 'amcl',
+            )
+            with self._lock:
+                self._localization_was_active = False
+        if navigation_was_active:
+            self._ensure_lifecycle_started(
+                'lifecycle_manager_navigation', 'planner_server',
+            )
+            with self._lock:
+                self._navigation_was_active = False
 
     def _safe_lifecycle(self, manager: str, command: int) -> None:
         try:

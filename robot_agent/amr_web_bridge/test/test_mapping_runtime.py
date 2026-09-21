@@ -2,6 +2,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
+
 from amr_web_bridge.mapping_runtime import MappingRuntime
 
 
@@ -13,6 +15,20 @@ class FakeProcess:
 
     def wait(self, timeout):
         return 0
+
+
+def test_web_mapping_uses_detailed_physical_slam_profile():
+    config_path = Path(__file__).parents[1] / 'config' / 'web_mapping.yaml'
+    parameters = yaml.safe_load(config_path.read_text(encoding='utf-8'))[
+        'slam_toolbox'
+    ]['ros__parameters']
+
+    assert parameters['use_sim_time'] is False
+    assert parameters['resolution'] == 0.03
+    assert parameters['scan_queue_size'] == 10
+    assert parameters['minimum_travel_distance'] == 0.05
+    assert parameters['minimum_travel_heading'] == 0.05
+    assert parameters['max_laser_range'] == 8.0
 
 
 def test_mapping_runtime_transitions_and_saves_validated_map(tmp_path, monkeypatch):
@@ -29,6 +45,8 @@ def test_mapping_runtime_transitions_and_saves_validated_map(tmp_path, monkeypat
                 encoding='utf-8',
             )
             output = 'response: slam_toolbox.srv.SaveMap_Response(result=0)'
+        elif 'lifecycle' in arguments and 'get' in arguments:
+            output = 'active [3]'
         else:
             output = 'response: nav2_msgs.srv.ManageLifecycleNodes_Response(success=True)'
         return SimpleNamespace(returncode=0, stdout=output, stderr='')
@@ -47,6 +65,7 @@ def test_mapping_runtime_transitions_and_saves_validated_map(tmp_path, monkeypat
     )
     runtime.start('mapping:robot01:abc')
     assert 'online_sync_launch.py' in launched[0]
+    assert 'use_sim_time:=false' in launched[0]
     assert runtime.snapshot(2)['phase'] == 'MAPPING'
     runtime.stop_capture()
     assert runtime.snapshot(3)['phase'] == 'REVIEW'
@@ -74,3 +93,120 @@ def test_mapping_runtime_rejects_existing_map(tmp_path):
     else:
         raise AssertionError('existing map ID was accepted')
     assert runtime.snapshot(1)['phase'] == 'REVIEW'
+
+
+def test_mapping_runtime_preserves_start_failure_detail(tmp_path):
+    def run(_arguments, **_kwargs):
+        raise RuntimeError('localization lifecycle service timed out')
+
+    runtime = MappingRuntime(
+        str(tmp_path),
+        run=run,
+        sleep=lambda _seconds: None,
+    )
+    try:
+        runtime.start('mapping:robot01:failed')
+    except RuntimeError as error:
+        assert str(error) == 'localization lifecycle service timed out'
+    else:
+        raise AssertionError('mapping start failure was not raised')
+
+    snapshot = runtime.snapshot(1)
+    assert snapshot['phase'] == 'FAILED'
+    assert snapshot['detail'] == (
+        'Unable to enter ROS mapping mode: '
+        'localization lifecycle service timed out'
+    )
+
+
+def test_mapping_skips_navigation_when_waiting_for_initial_pose(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def run(arguments, **_kwargs):
+        calls.append(arguments)
+        if 'lifecycle' in arguments and 'get' in arguments:
+            output = (
+                'unconfigured [1]'
+                if arguments[-1] == '/planner_server'
+                else 'active [3]'
+            )
+        else:
+            output = (
+                'response: '
+                'nav2_msgs.srv.ManageLifecycleNodes_Response(success=True)'
+            )
+        return SimpleNamespace(returncode=0, stdout=output, stderr='')
+
+    monkeypatch.setattr(
+        'amr_web_bridge.mapping_runtime.os.killpg', lambda *_args: None,
+    )
+    runtime = MappingRuntime(
+        str(tmp_path),
+        run=run,
+        popen=lambda *_args, **_kwargs: FakeProcess(),
+        sleep=lambda _seconds: None,
+    )
+    runtime.start('mapping:robot01:no-initial-pose')
+    runtime.discard()
+
+    manager_calls = [
+        command for command in calls
+        if any(value.endswith('/manage_nodes') for value in command)
+    ]
+    assert len(manager_calls) == 2
+    assert all(
+        '/lifecycle_manager_localization/manage_nodes' in command
+        for command in manager_calls
+    )
+
+
+def test_discard_accepts_lifecycle_started_after_lost_response(
+    tmp_path, monkeypatch,
+):
+    calls = []
+
+    def run(arguments, **_kwargs):
+        calls.append(arguments)
+        if 'service' in arguments and 'call' in arguments:
+            raise RuntimeError('lifecycle response timed out')
+        if arguments[-1] == '/amcl':
+            return SimpleNamespace(
+                returncode=0, stdout='active [3]', stderr='',
+            )
+        return SimpleNamespace(
+            returncode=0, stdout='unconfigured [1]', stderr='',
+        )
+
+    monkeypatch.setattr(
+        'amr_web_bridge.mapping_runtime.os.killpg', lambda *_args: None,
+    )
+    runtime = MappingRuntime(str(tmp_path), run=run, sleep=lambda _seconds: None)
+    runtime._phase = 'FAILED'
+    runtime._localization_was_active = True
+    runtime.discard()
+
+    assert runtime.snapshot(1)['phase'] == 'IDLE'
+    assert sum('service' in command for command in calls) == 1
+
+
+def test_discard_reports_restore_failure_and_remains_retryable(tmp_path):
+    def run(_arguments, **_kwargs):
+        raise RuntimeError('DDS service unavailable')
+
+    runtime = MappingRuntime(str(tmp_path), run=run, sleep=lambda _seconds: None)
+    runtime._phase = 'FAILED'
+    runtime._localization_was_active = True
+
+    try:
+        runtime.discard()
+    except RuntimeError as error:
+        assert 'failed to restore amcl after 3 attempts' in str(error)
+    else:
+        raise AssertionError('restore failure was not raised')
+
+    snapshot = runtime.snapshot(1)
+    assert snapshot['phase'] == 'FAILED'
+    assert 'Unable to restore Nav2 localization' in snapshot['detail']
+    assert runtime._localization_was_active is True
