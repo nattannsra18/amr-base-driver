@@ -53,6 +53,13 @@ def generate_launch_description():
         ),
         Node(
             package='amr_base_driver',
+            executable='guarded_reverse',
+            name='guarded_reverse',
+            output='screen',
+            condition=UnlessCondition(enable_drive_supervisor),
+        ),
+        Node(
+            package='amr_base_driver',
             executable='serial_bridge',
             name='amr_base_serial_bridge',
             output='screen',

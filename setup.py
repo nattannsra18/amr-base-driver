@@ -32,6 +32,7 @@ setup(
             'drive_supervisor = amr_base_driver.drive_supervisor:main',
             'cmd_vel_passthrough = '
             'amr_base_driver.cmd_vel_passthrough:main',
+            'guarded_reverse = amr_base_driver.guarded_reverse:main',
             'serial_bridge = amr_base_driver.serial_bridge:main',
             'safe_keyboard_teleop = amr_base_driver.safe_keyboard_teleop:main',
             'scan_resampler = amr_base_driver.scan_resampler:main',

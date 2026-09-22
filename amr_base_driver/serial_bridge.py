@@ -104,9 +104,15 @@ class SerialBridge(Node):
             SetBool, 'set_motors_enabled', self.set_motors_enabled)
         self.create_service(
             Trigger, 'clear_motor_fault', self.clear_motor_fault)
+        self.create_service(
+            SetBool, 'finish_motor_recovery', self.finish_motor_recovery)
         self.create_timer(0.01, self.io_tick)
         self.create_timer(0.10, self.command_tick)
-        self.create_timer(1.0, self.diagnostic_tick)
+        # Pre-stall is deliberately detected before the ESP32's hard encoder
+        # latch. Publish it at the same practical cadence as command updates
+        # so the recovery coordinator can stop, inspect the scan, and select
+        # one escape before that hardware deadline expires.
+        self.create_timer(0.10, self.diagnostic_tick)
 
         self.get_logger().info(
             f'ESP32 bridge starting on {self.port}; '
@@ -126,12 +132,37 @@ class SerialBridge(Node):
         self.requested_linear = 0.0
         self.requested_angular = 0.0
         self.last_cmd_monotonic = 0.0
-        self.motion_guard = MotionGuard()
         self.write_line('STOP')
+        if self.motion_guard.pre_stall:
+            if not self.motion_guard.begin_recovery(time.monotonic()):
+                response.success = False
+                response.message = 'Pre-stall recovery is not available'
+                return response
+            response.success = True
+            response.message = (
+                'Pre-stall recovery authorized once; MCU fault was not cleared')
+            return response
+
+        self.motion_guard = MotionGuard()
         self.write_line('CLEAR')
         response.success = True
         response.message = (
             'STOP and CLEAR sent; verify diagnostics mcu_fault=0 before motion')
+        return response
+
+    def finish_motor_recovery(self, request, response):
+        """Commit the bounded pre-stall maneuver result."""
+        if not self.motion_guard.finish_recovery(bool(request.data)):
+            response.success = False
+            response.message = 'No pre-stall recovery is in progress'
+            return response
+        self.write_line('STOP')
+        response.success = True
+        response.message = (
+            'Recovery completed; wheel feedback must remain healthy to rearm'
+            if request.data else
+            f'Recovery failed; latched {self.motion_guard.fault}'
+        )
         return response
 
     def set_motors_enabled(self, request, response):
@@ -159,7 +190,7 @@ class SerialBridge(Node):
             blockers.append(f'telemetry stale ({telemetry_age:.3f}s)')
         if self.mcu_fault:
             blockers.append(f'mcu_fault={self.mcu_fault}')
-        if self.motion_guard.fault:
+        if self.motion_guard.blocks_motion:
             blockers.append(f'host_fault={self.motion_guard.fault}')
         if blockers:
             self.motors_enabled = False
@@ -248,7 +279,7 @@ class SerialBridge(Node):
         now = time.monotonic()
         fresh = now - self.last_cmd_monotonic <= self.cmd_timeout
         healthy = (now - self.last_telemetry_monotonic < 0.3 and
-                   self.mcu_fault == 0 and not self.motion_guard.fault)
+                   self.mcu_fault == 0 and not self.motion_guard.blocks_motion)
         if not healthy:
             self.motion_guard.command(now, [0.0, 0.0])
             self.write_line('STOP')
@@ -319,11 +350,17 @@ class SerialBridge(Node):
         stamp = self.get_clock().now().to_msg()
         self.last_telemetry_monotonic = time.monotonic()
         previous_fault = self.motion_guard.fault
+        previous_pre_stall = self.motion_guard.pre_stall
         reason = self.motion_guard.sample(
             self.last_telemetry_monotonic, [left_rpm, right_rpm])
         if reason and not previous_fault:
             self.write_line('STOP')
             self.get_logger().error(f'Motors stopped: {reason}')
+        elif self.motion_guard.pre_stall and not previous_pre_stall:
+            self.write_line('STOP')
+            self.get_logger().warning(
+                'Motors paused before fault latch: '
+                f'{self.motion_guard.pre_stall}; waiting for one recovery attempt')
         self.telemetry_count += 1
         self.publish_imu(stamp, accel, gyro)
         self.publish_joint_state(stamp, left_count, right_count,
@@ -427,6 +464,12 @@ class SerialBridge(Node):
         elif self.motion_guard.fault:
             status.level = DiagnosticStatus.ERROR
             status.message = self.motion_guard.fault
+        elif self.motion_guard.pre_stall:
+            status.level = DiagnosticStatus.WARN
+            status.message = f'PRE_STALL: {self.motion_guard.pre_stall}'
+        elif self.motion_guard.recovery_in_progress:
+            status.level = DiagnosticStatus.WARN
+            status.message = 'Wheel feedback recovery in progress'
         elif not self.motors_enabled:
             status.level = DiagnosticStatus.WARN
             status.message = 'Healthy; motors locked for bench validation'
@@ -441,6 +484,11 @@ class SerialBridge(Node):
             KeyValue(key='mcu_flags', value=str(self.mcu_flags)),
             KeyValue(key='mcu_fault', value=str(self.mcu_fault)),
             KeyValue(key='host_motion_fault', value=self.motion_guard.fault),
+            KeyValue(key='host_motion_state', value=self.motion_guard.state),
+            KeyValue(
+                key='host_motion_reason',
+                value=(self.motion_guard.pre_stall
+                       or self.motion_guard.recovery_reason)),
             KeyValue(key='imu_temperature_c',
                      value=f'{self.temperature:.2f}'),
             KeyValue(key='motors_enabled', value=str(self.motors_enabled)),

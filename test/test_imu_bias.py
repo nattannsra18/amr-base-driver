@@ -31,6 +31,25 @@ def test_learns_measured_temperature_dependent_boot_offset():
     assert abs(b.bias[2]+.0496) < .001
 
 
+def test_learns_bias_with_current_stationary_z_axis_noise():
+    b = StationaryBias()
+    for i in range(140):
+        gyro = [
+            .014*math.sin(i),
+            .002*math.sin(i*.7),
+            .035*math.sin(i*.9),
+        ]
+        b.update(i*.05, gyro, 9.50, True)
+    assert b.ready
+
+
+def test_rejects_materially_unstable_stationary_window():
+    b = StationaryBias()
+    for i in range(200):
+        b.update(i*.05, [0, 0, .050*math.sin(i)], 9.8, True)
+    assert not b.ready
+
+
 def test_rejects_large_rotation():
     b = StationaryBias()
     for i in range(200):

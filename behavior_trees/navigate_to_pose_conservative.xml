@@ -1,12 +1,19 @@
 <!--
   Physical-robot tree: replan when the path becomes invalid. If navigation
-  fails, clear both costmaps, then try one short collision-checked reverse
-  motion before planning again. Automatic spin remains disabled until it has
-  passed a separate attended caster floor test.
+  fails, try one short collision-checked reverse motion before planning again,
+  then clear both costmaps on the next retry.  Reverse comes first so a chassis
+  caught on furniture does not wait through another full progress-check cycle.
+  Automatic spin remains disabled until it has passed a separate attended
+  caster floor test.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="3" name="NavigateRecovery">
+    <!--
+      One Nav2 recovery cycle is enough on the physical base.  A longer retry
+      loop kept a wedged chassis stationary for roughly 50 seconds before the
+      agent could run its independent scan-guarded escape.
+    -->
+    <RecoveryNode number_of_retries="1" name="NavigateRecovery">
       <PipelineSequence name="NavigateWithConservativeReplanning">
         <ControllerSelector selected_controller="{selected_controller}"
                             default_controller="FollowPath"
@@ -14,27 +21,41 @@
         <PlannerSelector selected_planner="{selected_planner}"
                          default_planner="GridBased"
                          topic_name="planner_selector"/>
-        <RateController hz="1.0">
-          <Fallback>
-            <ReactiveSequence>
-              <Inverter>
-                <GlobalUpdatedGoal/>
-              </Inverter>
-              <IsPathValid path="{path}"/>
-            </ReactiveSequence>
-            <ComputePathToPose goal="{goal}"
-                               path="{path}"
-                               planner_id="{selected_planner}"
-                               error_code_id="{compute_path_error_code}"/>
-          </Fallback>
-        </RateController>
-        <FollowPath path="{path}"
-                    controller_id="{selected_controller}"
-                    error_code_id="{follow_path_error_code}"/>
+        <RecoveryNode number_of_retries="1" name="ComputePathRecovery">
+          <RateController hz="1.0">
+            <Fallback>
+              <ReactiveSequence>
+                <Inverter>
+                  <GlobalUpdatedGoal/>
+                </Inverter>
+                <IsPathValid path="{path}"/>
+              </ReactiveSequence>
+              <ComputePathToPose goal="{goal}"
+                                 path="{path}"
+                                 planner_id="{selected_planner}"
+                                 error_code_id="{compute_path_error_code}"/>
+            </Fallback>
+          </RateController>
+          <ClearEntireCostmap
+            name="ClearGlobalCostmapForPlanner"
+            service_name="global_costmap/clear_entirely_global_costmap"/>
+        </RecoveryNode>
+        <RecoveryNode number_of_retries="1" name="FollowPathRecovery">
+          <FollowPath path="{path}"
+                      controller_id="{selected_controller}"
+                      error_code_id="{follow_path_error_code}"/>
+          <ClearEntireCostmap
+            name="ClearLocalCostmapForController"
+            service_name="local_costmap/clear_entirely_local_costmap"/>
+        </RecoveryNode>
       </PipelineSequence>
       <ReactiveFallback name="RecoveryFallback">
         <GoalUpdated/>
         <RoundRobin name="ConservativeRecoveryActions">
+          <BackUp backup_dist="0.12"
+                  backup_speed="0.08"
+                  time_allowance="4.0"
+                  error_code_id="{backup_error_code}"/>
           <Sequence name="ClearBothCostmaps">
             <ClearEntireCostmap
               name="ClearLocalCostmap"
@@ -43,10 +64,6 @@
               name="ClearGlobalCostmap"
               service_name="global_costmap/clear_entirely_global_costmap"/>
           </Sequence>
-          <BackUp backup_dist="0.12"
-                  backup_speed="0.08"
-                  time_allowance="4.0"
-                  error_code_id="{backup_error_code}"/>
           <Wait wait_duration="1.0"/>
         </RoundRobin>
       </ReactiveFallback>

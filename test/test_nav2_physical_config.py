@@ -43,10 +43,21 @@ def test_controller_uses_regulated_pure_pursuit_without_reversing():
     assert controller['allow_reversing'] is False
 
 
-def test_behavior_server_only_enables_conservative_recovery_plugins():
+def test_progress_checker_hands_off_to_recovery_promptly():
+    params = load_nav2_params()
+    progress_checker = (
+        params['controller_server']['ros__parameters']['progress_checker']
+    )
+    assert progress_checker['required_movement_radius'] == 0.05
+    assert progress_checker['movement_time_allowance'] == 4.0
+
+
+def test_behavior_server_exposes_only_bounded_recovery_plugins():
     params = load_nav2_params()
     behavior = params['behavior_server']['ros__parameters']
-    assert behavior['behavior_plugins'] == ['backup', 'wait']
+    # Spin is available to the scan-gated one-shot stall recovery, while the
+    # default behavior tree below still forbids an automatic blind spin.
+    assert behavior['behavior_plugins'] == ['backup', 'spin', 'wait']
     assert behavior['robot_base_frame'] == 'base_footprint'
     assert behavior['simulate_ahead_time'] == 2.0
 
@@ -62,6 +73,7 @@ def test_behavior_tree_uses_short_backup_without_automatic_spin():
     assert '<BackUp backup_dist="0.12"' in tree
     assert 'backup_speed="0.08"' in tree
     assert 'time_allowance="4.0"' in tree
+    assert tree.index('<BackUp') < tree.index('<Sequence name="ClearBothCostmaps">')
 
 
 def test_navigation_launch_starts_and_manages_behavior_server():

@@ -3,6 +3,8 @@ from collections import deque
 import math
 import statistics
 
+MAX_STATIONARY_GYRO_STD = 0.030
+
 
 class StationaryBias:
     def __init__(self):
@@ -31,12 +33,12 @@ class StationaryBias:
         if len(self.samples) < 60 or now-self.samples[0][0] < 4.8:
             return list(self.bias)
         axes = list(zip(*(s[1] for s in self.samples)))
-        # Live 15 s probe on this unit measured stationary X/Y standard
-        # deviations of 0.0160/0.0136 rad/s; Z was 0.00445 rad/s.  The wheel,
-        # command, acceleration, and bounded-rate gates above still reject
-        # actual motion, while 0.020 avoids permanently rejecting this unit's
-        # normal cross-axis noise.
-        if any(statistics.pstdev(a) > 0.020 for a in axes):
+        # Live stationary probes have shown temperature-dependent axis noise
+        # up to roughly 0.025 rad/s.  Motion is still rejected by the wheel,
+        # command, gravity, five-second, and absolute-rate gates above; this
+        # bounded noise allowance avoids leaving a stationary unit in WARN
+        # forever while still rejecting materially unstable samples.
+        if any(statistics.pstdev(a) > MAX_STATIONARY_GYRO_STD for a in axes):
             return list(self.bias)
         means = [statistics.mean(a) for a in axes]
         alpha = 1.0 if not self.ready else 1.0-math.exp(-dt/30.0)
