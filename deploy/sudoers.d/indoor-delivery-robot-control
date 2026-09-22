@@ -1,0 +1,2 @@
+# The helper validates its fixed actions and map path internally.
+indoor-robot ALL=(root) NOPASSWD: /usr/local/sbin/indoor-delivery-robot-control *

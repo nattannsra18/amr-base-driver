@@ -5,6 +5,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import IncludeLaunchDescription
 from launch.actions import TimerAction
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -16,6 +17,7 @@ def generate_launch_description():
     map_file = LaunchConfiguration('map_yaml')
     enable_motors = LaunchConfiguration('enable_motors')
     enable_drive_supervisor = LaunchConfiguration('enable_drive_supervisor')
+    start_localization = LaunchConfiguration('start_localization')
     ekf_transform_time_offset = LaunchConfiguration(
         'ekf_transform_time_offset')
 
@@ -56,6 +58,7 @@ def generate_launch_description():
         executable='map_server',
         name='map_server',
         output='screen',
+        condition=IfCondition(start_localization),
         parameters=[localization_params, {'yaml_filename': map_file}],
     )
     amcl = Node(
@@ -63,6 +66,7 @@ def generate_launch_description():
         executable='amcl',
         name='amcl',
         output='screen',
+        condition=IfCondition(start_localization),
         parameters=[localization_params],
     )
     lifecycle_manager = Node(
@@ -70,20 +74,22 @@ def generate_launch_description():
         executable='lifecycle_manager',
         name='lifecycle_manager_localization',
         output='screen',
+        condition=IfCondition(start_localization),
         parameters=[{
             'autostart': True,
             'node_names': ['map_server', 'amcl'],
         }],
     )
 
-    default_map = os.path.join(
-        os.path.expanduser('~'), 'amr_ws', 'maps',
-        'slam_post_wheel_repair_20260920_082948.yaml')
-
     return LaunchDescription([
         DeclareLaunchArgument(
-            'map_yaml', default_value=default_map,
-            description='Absolute path to the occupancy-grid map YAML.'),
+            'map_yaml', default_value='',
+            description='Absolute path to the selected occupancy-grid map YAML.'),
+        DeclareLaunchArgument(
+            'start_localization', default_value='true',
+            description=(
+                'Start map server and AMCL only when an active map has been '
+                'selected. Base hardware and LiDAR remain available otherwise.')),
         DeclareLaunchArgument(
             'enable_motors', default_value='false',
             description='Unlock motion only for an attended localization test.'),

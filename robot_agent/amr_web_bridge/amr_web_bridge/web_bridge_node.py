@@ -49,11 +49,13 @@ from .agent_identity import (
 )
 
 from .map_catalog import (
+    active_map_id_from_link,
     available_map_yaml,
     build_map_catalog,
     delete_map,
     MAP_ID_PATTERN,
     rename_map,
+    set_active_map_link,
     update_map_metadata,
 )
 from .mapping_runtime import MappingRuntime
@@ -94,6 +96,10 @@ class WebBridgeNode(Node):
         self.declare_parameter(
             'active_map_id',
             os.getenv('AMR_ACTIVE_MAP_ID', 'warehouse_map'),
+        )
+        self.declare_parameter(
+            'active_map_link',
+            os.getenv('AMR_ACTIVE_MAP_LINK', ''),
         )
         self.declare_parameter('map_catalog_period', 10.0)
         self.declare_parameter('load_map_service', '/map_server/load_map')
@@ -209,9 +215,22 @@ class WebBridgeNode(Node):
         self.maps_directory = str(
             self.get_parameter('maps_directory').value
         )
-        self.active_map_id = str(
+        self.active_map_link = str(
+            self.get_parameter('active_map_link').value
+        ).strip()
+        configured_active_map_id = str(
             self.get_parameter('active_map_id').value
         ).strip() or None
+        linked_active_map_id = active_map_id_from_link(
+            self.maps_directory,
+            self.active_map_link,
+        ) if self.active_map_link else None
+        # A physical robot with an active-map link must never revive a stale
+        # profile value. No valid link is an explicit no-map state.
+        self.active_map_id = (
+            linked_active_map_id
+            if self.active_map_link else configured_active_map_id
+        )
         self.map_catalog_period = max(
             2.0,
             float(self.get_parameter('map_catalog_period').value),
@@ -657,6 +676,10 @@ class WebBridgeNode(Node):
         self.get_logger().info(f'Map topic: {self.map_topic}')
         self.get_logger().info(
             f'Map catalog directory: {self.maps_directory or "not configured"}'
+        )
+        self.get_logger().info(
+            'Active map: '
+            f'{self.active_map_id or "not selected"}'
         )
         self.get_logger().info(
             f'Nav2 load map service: {self.load_map_service}'
@@ -4203,10 +4226,32 @@ class WebBridgeNode(Node):
             self.active_map_command = command
 
         if not self.load_map_client.wait_for_service(timeout_sec=1.0):
+            if self.active_map_link:
+                succeeded, output = (
+                    self.navigation_recovery_runner.activate_map(
+                        str(command['yaml_path'])
+                    )
+                )
+                if succeeded:
+                    self.active_map_id = str(command['map_id'])
+                    self.finish_map_switch(
+                        command,
+                        True,
+                        'Active map saved; localization and Nav2 are starting. '
+                        'Set Initial Pose after the map is ready.',
+                    )
+                    return
+                self.finish_map_switch(
+                    command,
+                    False,
+                    output or 'Unable to start navigation with the selected map',
+                )
+                return
             self.finish_map_switch(
                 command,
                 False,
-                'Nav2 LoadMap service is unavailable',
+                'No active map is running. Select a valid map to start '
+                'localization and Nav2.',
             )
             return
 
@@ -4251,9 +4296,26 @@ class WebBridgeNode(Node):
             return
 
         self.active_map_id = str(command['map_id'])
+        detail = 'Nav2 map server loaded the map'
+        if self.active_map_link:
+            try:
+                set_active_map_link(
+                    self.maps_directory,
+                    self.active_map_link,
+                    self.active_map_id,
+                )
+            except (OSError, ValueError) as error:
+                self.get_logger().error(
+                    f'Nav2 loaded {self.active_map_id}, but it could not be '
+                    f'persisted as the active map: {error}'
+                )
+                detail = (
+                    'Nav2 map server loaded the map, but it was not saved '
+                    'as the boot map'
+                )
         if int(response.map.info.width) > 0 and int(response.map.info.height) > 0:
             self.map_callback(response.map)
-        self.finish_map_switch(command, True, 'Nav2 map server loaded the map')
+        self.finish_map_switch(command, True, detail)
 
     def finish_map_switch(
         self,

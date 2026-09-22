@@ -45,6 +45,7 @@ def bridge(tmp_path):
         robot_id='robot01',
         maps_directory=str(tmp_path),
         active_map_id='warehouse_map',
+        active_map_link='',
         command_lock=threading.Lock(),
         preview_lock=threading.Lock(),
         map_command_lock=threading.Lock(),
@@ -122,6 +123,29 @@ def test_map_switch_rejects_unavailable_map_before_nav2(tmp_path):
     assert value.map_command_queue.empty()
     assert value.sent[-1]['accepted'] is False
     assert value.sent[-1]['detail'] == 'Map is unavailable on the robot'
+
+
+def test_map_switch_starts_nav2_when_the_robot_has_no_active_map(tmp_path):
+    value = bridge(tmp_path)
+    value.active_map_link = str(tmp_path / '.active-map.yaml')
+
+    class NoLoadMapService:
+        def wait_for_service(self, timeout_sec):
+            return False
+
+    class Runner:
+        def activate_map(self, map_yaml):
+            assert map_yaml == str(tmp_path / 'second.yaml')
+            return True, 'Active map selected: second.yaml'
+
+    value.load_map_client = NoLoadMapService()
+    value.navigation_recovery_runner = Runner()
+    asyncio.run(WebBridgeNode.handle_map_command(value, object(), command()))
+    WebBridgeNode.process_map_command_queue(value)
+
+    assert value.active_map_id == 'second'
+    assert value.sent[0]['accepted'] is True
+    assert 'localization and Nav2 are starting' in value.sent[0]['detail']
 
 
 def test_map_catalog_command_updates_metadata_and_reports_catalog(tmp_path):

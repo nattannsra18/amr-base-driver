@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Restricted root entry point for the Agent. Do not accept arbitrary commands.
+set -Eeuo pipefail
+
+readonly NAVIGATION_SERVICE="indoor-delivery-robot-navigation.service"
+readonly MAPS_DIRECTORY="/home/odroid/amr_ws/maps"
+readonly ACTIVE_MAP_LINK="$MAPS_DIRECTORY/.active-map.yaml"
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
+
+select_map() {
+  (($# == 1)) || fail 'select-map requires one map YAML path'
+  local candidate map_directory temporary
+  candidate="$(readlink -f -- "$1")"
+  map_directory="$(readlink -f -- "$MAPS_DIRECTORY")"
+  [[ -f "$candidate" && "$candidate" == "$map_directory"/*.yaml ]] || \
+    fail 'Map YAML must be a readable file in the configured maps directory'
+
+  temporary="$(mktemp "$MAPS_DIRECTORY/.active-map.XXXXXX")"
+  rm -f -- "$temporary"
+  ln -s -- "$candidate" "$temporary"
+  mv -Tf -- "$temporary" "$ACTIVE_MAP_LINK"
+  systemctl restart "$NAVIGATION_SERVICE"
+  printf 'Active map selected: %s\n' "$(basename -- "$candidate")"
+}
+
+case "${1:-}" in
+  start-navigation)
+    (($# == 1)) || fail 'start-navigation does not accept arguments'
+    systemctl start "$NAVIGATION_SERVICE"
+    ;;
+  restart-navigation)
+    (($# == 1)) || fail 'restart-navigation does not accept arguments'
+    systemctl restart "$NAVIGATION_SERVICE"
+    ;;
+  stop-navigation)
+    (($# == 1)) || fail 'stop-navigation does not accept arguments'
+    systemctl stop "$NAVIGATION_SERVICE"
+    ;;
+  poweroff)
+    (($# == 1)) || fail 'poweroff does not accept arguments'
+    systemctl poweroff
+    ;;
+  activate-map)
+    shift
+    select_map "$@"
+    systemctl restart "$NAVIGATION_SERVICE"
+    ;;
+  select-map)
+    shift
+    select_map "$@"
+    ;;
+  *)
+    fail 'Unsupported system action'
+    ;;
+esac

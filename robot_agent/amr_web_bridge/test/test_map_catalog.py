@@ -1,11 +1,13 @@
 from pathlib import Path
 
 from amr_web_bridge.map_catalog import (
+    active_map_id_from_link,
     available_map_yaml,
     build_map_catalog,
     delete_map,
     read_map_record,
     rename_map,
+    set_active_map_link,
     update_map_metadata,
 )
 
@@ -57,6 +59,27 @@ def test_available_map_yaml_rejects_traversal_and_missing_assets(tmp_path: Path)
     assert available_map_yaml(str(tmp_path), 'ready') == tmp_path / 'ready.yaml'
     assert available_map_yaml(str(tmp_path), '../ready') is None
     assert available_map_yaml(str(tmp_path), 'broken') is None
+
+
+def test_active_map_link_persists_only_a_valid_map_inside_the_catalog(
+    tmp_path: Path,
+):
+    (tmp_path / 'ready.pgm').write_bytes(b'P5\n1 1\n255\n\x00')
+    (tmp_path / 'ready.yaml').write_text(
+        'image: ready.pgm\nresolution: 0.05\n', encoding='utf-8'
+    )
+    link = tmp_path / '.active-map.yaml'
+
+    set_active_map_link(str(tmp_path), str(link), 'ready')
+
+    assert link.is_symlink()
+    assert active_map_id_from_link(str(tmp_path), str(link)) == 'ready'
+
+
+def test_missing_or_outside_active_map_link_does_not_select_a_map(tmp_path: Path):
+    assert active_map_id_from_link(
+        str(tmp_path), str(tmp_path / '.active-map.yaml')
+    ) is None
 
 
 def test_metadata_and_rename_are_persisted_as_robot_sidecar(tmp_path: Path):

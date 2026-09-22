@@ -7,7 +7,7 @@ from launch.actions import IncludeLaunchDescription
 from launch.actions import TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 
 
@@ -17,6 +17,8 @@ def generate_launch_description():
     enable_motors = LaunchConfiguration('enable_motors')
     activate_after_initial_pose = LaunchConfiguration(
         'activate_after_initial_pose')
+    start_localization = LaunchConfiguration('start_localization')
+    start_navigation = LaunchConfiguration('start_navigation')
     ekf_transform_time_offset = LaunchConfiguration(
         'ekf_transform_time_offset')
     params_file = LaunchConfiguration('params_file')
@@ -29,6 +31,7 @@ def generate_launch_description():
             'enable_motors': enable_motors,
             'enable_drive_supervisor': 'false',
             'ekf_transform_time_offset': ekf_transform_time_offset,
+            'start_localization': start_localization,
         }.items(),
     )
 
@@ -38,6 +41,7 @@ def generate_launch_description():
         executable='controller_server',
         name='controller_server',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=common_parameters,
         remappings=[('cmd_vel', '/cmd_vel_nav')],
     )
@@ -46,6 +50,7 @@ def generate_launch_description():
         executable='planner_server',
         name='planner_server',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=common_parameters,
     )
     smoother = Node(
@@ -53,6 +58,7 @@ def generate_launch_description():
         executable='smoother_server',
         name='smoother_server',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=common_parameters,
     )
     velocity_smoother = Node(
@@ -60,6 +66,7 @@ def generate_launch_description():
         executable='velocity_smoother',
         name='velocity_smoother',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=common_parameters,
         remappings=[
             ('cmd_vel', '/cmd_vel_nav'),
@@ -71,6 +78,7 @@ def generate_launch_description():
         executable='collision_monitor',
         name='collision_monitor',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=common_parameters,
     )
     behavior_server = Node(
@@ -78,6 +86,7 @@ def generate_launch_description():
         executable='behavior_server',
         name='behavior_server',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=common_parameters,
         remappings=[('cmd_vel', '/cmd_vel_nav')],
     )
@@ -86,6 +95,7 @@ def generate_launch_description():
         executable='bt_navigator',
         name='bt_navigator',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=[
             params_file,
             {'default_nav_to_pose_bt_xml': os.path.join(
@@ -98,6 +108,7 @@ def generate_launch_description():
         executable='lifecycle_manager',
         name='lifecycle_manager_navigation',
         output='screen',
+        condition=IfCondition(start_navigation),
         parameters=[{
             'autostart': False,
             'node_names': [
@@ -116,19 +127,25 @@ def generate_launch_description():
         executable='nav2_activation_gate',
         name='nav2_activation_gate',
         output='screen',
-        condition=IfCondition(activate_after_initial_pose),
+        condition=IfCondition(PythonExpression([
+            start_navigation, " == 'true' and ",
+            activate_after_initial_pose, " == 'true'",
+        ])),
     )
 
-    default_map = os.path.join(
-        os.path.expanduser('~'), 'amr_ws', 'maps',
-        'slam_post_wheel_repair_20260920_082948.yaml')
     default_params = os.path.join(
         base_share, 'config', 'nav2_physical.yaml')
 
     return LaunchDescription([
         DeclareLaunchArgument(
-            'map_yaml', default_value=default_map,
-            description='Absolute path to the validated physical map YAML.'),
+            'map_yaml', default_value='',
+            description='Absolute path to the selected physical map YAML.'),
+        DeclareLaunchArgument(
+            'start_localization', default_value='true',
+            description='Start AMCL only when an active map is available.'),
+        DeclareLaunchArgument(
+            'start_navigation', default_value='true',
+            description='Start Nav2 only when an active map is available.'),
         DeclareLaunchArgument(
             'params_file', default_value=default_params,
             description='Physical-robot Nav2 parameter file.'),

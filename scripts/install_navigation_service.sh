@@ -20,13 +20,14 @@ Install the physical AMCL and Nav2 stack as a systemd service.
 
 Usage:
   sudo ./scripts/install_navigation_service.sh \
-    --map-yaml /home/odroid/amr_ws/maps/validated-map.yaml \
+    [--map-yaml /home/odroid/amr_ws/maps/validated-map.yaml] \
     [--workspace /home/odroid/amr_ws] [--enable-motors] \
     [--ros-distro jazzy] [--no-start] [--dry-run]
 
-The navigation service starts the base driver, YDLidar, scan resampler, map
-server, AMCL, and Nav2. It never sends a navigation goal at boot. Nav2 is
-activated only after AMCL receives an operator-confirmed initial pose.
+The navigation service always starts the base driver, YDLidar, and scan
+resampler. Map server, AMCL, and Nav2 start only after Map Management has
+selected a validated active map. Supplying --map-yaml sets that initial active
+map; omitting it creates a safe no-map startup state.
 EOF
 }
 
@@ -52,16 +53,17 @@ while (($#)); do
   esac
 done
 
-[[ -n "$MAP_FILE" ]] || fail "--map-yaml is required"
 [[ "$ROS_DISTRO_NAME" =~ ^[a-z0-9_]+$ ]] || fail "Invalid ROS distribution name"
 [[ -f "/opt/ros/$ROS_DISTRO_NAME/setup.bash" ]] || fail "ROS setup not found: /opt/ros/$ROS_DISTRO_NAME/setup.bash"
 [[ -f "$WORKSPACE/install/setup.bash" ]] || fail "Workspace is not built: $WORKSPACE/install/setup.bash"
-[[ -f "$MAP_FILE" ]] || fail "Map YAML was not found: $MAP_FILE"
+[[ -z "$MAP_FILE" || -f "$MAP_FILE" ]] || fail "Map YAML was not found: $MAP_FILE"
 [[ -f "$REPOSITORY_ROOT/deploy/systemd/$SERVICE_NAME" ]] || fail "Service template was not found"
 [[ "$EUID" -eq 0 || "$DRY_RUN" == true ]] || fail "Run this installer with sudo, or use --dry-run"
 
 WORKSPACE="$(readlink -f -- "$WORKSPACE")"
-MAP_FILE="$(readlink -f -- "$MAP_FILE")"
+if [[ -n "$MAP_FILE" ]]; then
+  MAP_FILE="$(readlink -f -- "$MAP_FILE")"
+fi
 ENV_FILE="$(mktemp)"
 cleanup() { rm -f -- "$ENV_FILE"; }
 trap cleanup EXIT
@@ -69,7 +71,7 @@ trap cleanup EXIT
 {
   printf 'ROS_DISTRO=%s\n' "$ROS_DISTRO_NAME"
   printf 'AMR_WORKSPACE=%s\n' "$WORKSPACE"
-  printf 'AMR_MAP_FILE=%s\n' "$MAP_FILE"
+  printf 'AMR_ACTIVE_MAP_LINK=%s/maps/.active-map.yaml\n' "$WORKSPACE"
   printf 'AMR_ENABLE_MOTORS=%s\n' "$ENABLE_MOTORS"
   # Keep every robot-side ROS process on the same transport. The Agent runs as
   # a separate service account, so UDP avoids Fast DDS shared-memory permission
@@ -80,6 +82,15 @@ trap cleanup EXIT
 info "Installing the navigation boot service"
 run install -d -m 0755 "$CONFIG_DIR"
 run install -o root -g root -m 0644 "$ENV_FILE" "$CONFIG_DIR/navigation.env"
+run install -o root -g root -m 0755 \
+  "$REPOSITORY_ROOT/deploy/indoor-delivery-robot-navigation" \
+  "/usr/local/sbin/indoor-delivery-robot-navigation"
+run install -o root -g root -m 0755 \
+  "$REPOSITORY_ROOT/deploy/indoor-delivery-robot-control" \
+  "/usr/local/sbin/indoor-delivery-robot-control"
+run install -o root -g root -m 0440 \
+  "$REPOSITORY_ROOT/deploy/sudoers.d/indoor-delivery-robot-control" \
+  "/etc/sudoers.d/indoor-delivery-robot-control"
 run install -o root -g root -m 0644 \
   "$REPOSITORY_ROOT/deploy/systemd/$SERVICE_NAME" \
   "/etc/systemd/system/$SERVICE_NAME"
@@ -92,6 +103,9 @@ if systemctl list-unit-files --type=service | grep -q '^ydlidar-x3.service'; the
 fi
 
 run systemctl enable "$SERVICE_NAME"
+if [[ -n "$MAP_FILE" ]]; then
+  run /usr/local/sbin/indoor-delivery-robot-control select-map "$MAP_FILE"
+fi
 if "$NO_START"; then
   info "Installed without starting the service (--no-start)"
 else

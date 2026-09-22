@@ -136,24 +136,26 @@ sudo ./scripts/install_robot_agent.sh \
 ## Start after ODROID power-on
 
 Install the navigation boot service once to start the physical base driver,
-LiDAR, scan resampler, AMCL, and Nav2 whenever the ODROID starts. The service
-owns the LiDAR, so it disables the older standalone `ydlidar-x3.service` to
-avoid two drivers opening the same serial device. It sends no navigation goal
-at startup; the ESP32 watchdog also requires a fresh command before PWM can be
-applied.
+LiDAR, and scan resampler whenever the ODROID starts. The service owns the
+LiDAR, so it disables the older standalone `ydlidar-x3.service` to avoid two
+drivers opening the same serial device. AMCL and Nav2 start only after Map
+Management selects a valid active map. The selected map is persisted through a
+stable active-map link, so service startup never depends on a timestamped map
+filename. It sends no navigation goal at startup; the ESP32 watchdog also
+requires a fresh command before PWM can be applied.
 
 ```bash
 sudo ./scripts/install_navigation_service.sh \
-  --map-yaml /home/odroid/amr_ws/maps/slam_post_wheel_repair_20260920_082948.yaml \
   --enable-motors
 ```
 
-The service starts the navigation stack automatically, but it deliberately
-waits for an operator-confirmed Initial Pose before activating Nav2. A saved
-map cannot establish the physical robot's current position after it has been
-moved while powered off. Set the Initial Pose in the web control center after
-placing the robot; this only establishes localization and does not issue a
-motion command.
+Optionally include `--map-yaml` during installation to set the first active
+map. Otherwise select a map in Map Management; the Agent saves it and starts
+the localization stack. Nav2 deliberately waits for an operator-confirmed
+Initial Pose before activating. A saved map cannot establish the physical
+robot's current position after it has been moved while powered off. Set the
+Initial Pose in the web control center after placing the robot; this only
+establishes localization and does not issue a motion command.
 
 ## Power and pinout
 

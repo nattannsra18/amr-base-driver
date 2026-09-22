@@ -141,6 +141,67 @@ def available_map_yaml(maps_directory: str, map_id: str) -> Path | None:
     return candidate if record['available'] else None
 
 
+def active_map_id_from_link(
+    maps_directory: str,
+    active_map_link: str,
+) -> str | None:
+    """Return the validated map selected by the persistent active-map link.
+
+    The symlink is intentionally kept beside the maps rather than pointing a
+    systemd service at a timestamped map name.  A missing or unsafe link means
+    that this robot has no active map; it must not silently fall back to an
+    unrelated map.
+    """
+    directory_value = maps_directory.strip()
+    link_value = active_map_link.strip()
+    if not directory_value or not link_value:
+        return None
+    try:
+        directory = Path(directory_value).expanduser().resolve()
+        link = Path(link_value).expanduser()
+        if not link.is_absolute():
+            link = directory / link
+        target = link.resolve(strict=True)
+    except OSError:
+        return None
+    if (
+        not target.is_relative_to(directory)
+        or target.suffix != '.yaml'
+        or MAP_ID_PATTERN.fullmatch(target.stem) is None
+    ):
+        return None
+    validated = available_map_yaml(str(directory), target.stem)
+    return target.stem if validated == target else None
+
+
+def set_active_map_link(
+    maps_directory: str,
+    active_map_link: str,
+    map_id: str,
+) -> Path:
+    """Atomically persist a previously validated map as the active map."""
+    yaml_path = available_map_yaml(maps_directory, map_id)
+    if yaml_path is None:
+        raise ValueError('Map is unavailable on the robot')
+    directory = Path(maps_directory).expanduser().resolve()
+    link = Path(active_map_link).expanduser()
+    if not link.is_absolute():
+        link = directory / link
+    try:
+        link.parent.resolve().relative_to(directory)
+    except ValueError as error:
+        raise ValueError('Active map link must remain inside the maps directory') from error
+
+    temporary = link.with_name(f'.{link.name}.tmp')
+    try:
+        temporary.unlink(missing_ok=True)
+        temporary.symlink_to(yaml_path)
+        os.replace(temporary, link)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return yaml_path
+
+
 def update_map_metadata(
     maps_directory: str,
     map_id: str,

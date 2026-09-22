@@ -15,7 +15,7 @@ WorkingDirectory=/home/odroid/amr_ws
 EnvironmentFile=/etc/indoor-delivery-robot/navigation.env
 ExecStartPre=/usr/bin/test -c /dev/ttyAML6
 ExecStartPre=/usr/bin/test -e /dev/robot-lidar
-ExecStart=/usr/bin/bash -lc 'source "/opt/ros/$ROS_DISTRO/setup.bash" && source "$AMR_WORKSPACE/install/setup.bash" && exec ros2 launch amr_base_driver navigation.launch.py map_yaml:="$AMR_MAP_FILE" enable_motors:="$AMR_ENABLE_MOTORS" activate_after_initial_pose:=true'
+ExecStart=/usr/local/sbin/indoor-delivery-robot-navigation
 Restart=always
 RestartSec=5
 TimeoutStopSec=30

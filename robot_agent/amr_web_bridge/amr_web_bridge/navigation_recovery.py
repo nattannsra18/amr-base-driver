@@ -223,3 +223,10 @@ class NavigationRecoveryRunner:
         }:
             return False, 'Unsupported system action'
         return self._command(['sudo', self.control_helper, action], timeout=12.0)
+
+    def activate_map(self, map_yaml: str) -> tuple[bool, str]:
+        """Persist one validated map and start Nav2 through the root helper."""
+        return self._command(
+            ['sudo', self.control_helper, 'activate-map', map_yaml],
+            timeout=18.0,
+        )

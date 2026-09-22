@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Start the base stack in a safe no-map mode when no active map is selected.
+set -Eeo pipefail
+
+: "${ROS_DISTRO:?ROS_DISTRO is required}"
+: "${AMR_WORKSPACE:?AMR_WORKSPACE is required}"
+
+readonly DEFAULT_ACTIVE_MAP_LINK="$AMR_WORKSPACE/maps/.active-map.yaml"
+readonly ACTIVE_MAP_LINK="${AMR_ACTIVE_MAP_LINK:-$DEFAULT_ACTIVE_MAP_LINK}"
+
+# Launch arguments must be non-empty even when the corresponding map nodes are
+# disabled. This sentinel is never opened while start_map_stack is false.
+map_yaml="$AMR_WORKSPACE/maps/.no-active-map.yaml"
+start_map_stack=false
+if [[ -f "$ACTIVE_MAP_LINK" ]]; then
+  map_yaml="$(readlink -f -- "$ACTIVE_MAP_LINK")"
+  start_map_stack=true
+fi
+
+if ! "$start_map_stack"; then
+  printf '%s\n' \
+    'No active map selected; starting base, LiDAR, and Robot Agent support only.' >&2
+fi
+
+source "/opt/ros/$ROS_DISTRO/setup.bash"
+source "$AMR_WORKSPACE/install/setup.bash"
+exec ros2 launch amr_base_driver navigation.launch.py \
+  map_yaml:="$map_yaml" \
+  enable_motors:="${AMR_ENABLE_MOTORS:-false}" \
+  activate_after_initial_pose:=true \
+  start_localization:="$start_map_stack" \
+  start_navigation:="$start_map_stack"

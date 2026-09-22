@@ -30,7 +30,10 @@ amr_web_bridge:
     base_frame: base_footprint
 
     maps_directory: /home/odroid/amr_ws/maps
-    active_map_id: slam_post_wheel_repair_20260920_082948
+    # Map Management maintains this link. A missing link is a supported
+    # no-map state, not a reason to revive a deleted historical filename.
+    active_map_id: ""
+    active_map_link: /home/odroid/amr_ws/maps/.active-map.yaml
     heartbeat_period: 5.0
     telemetry_period: 1.0
     diagnostics_stale_after_seconds: 3.0
