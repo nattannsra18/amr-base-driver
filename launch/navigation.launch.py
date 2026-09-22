@@ -128,8 +128,8 @@ def generate_launch_description():
         name='nav2_activation_gate',
         output='screen',
         condition=IfCondition(PythonExpression([
-            start_navigation, " == 'true' and ",
-            activate_after_initial_pose, " == 'true'",
+            "'", start_navigation, "' == 'true' and '",
+            activate_after_initial_pose, "' == 'true'",
         ])),
     )
 

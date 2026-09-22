@@ -85,6 +85,16 @@ def test_navigation_launch_starts_and_manages_behavior_server():
     assert "'behavior_server'," in launch
 
 
+def test_navigation_activation_condition_quotes_launch_values():
+    launch = (PACKAGE_ROOT / 'launch' / 'navigation.launch.py').read_text(
+        encoding='utf-8')
+    # LaunchConfiguration values substitute to bare words such as `true`.
+    # PythonExpression must quote them, otherwise it evaluates a nonexistent
+    # Python name and tears down the entire navigation launch at the timer.
+    assert '"\'", start_navigation, "\' == \'true\' and \'"' in launch
+    assert 'activate_after_initial_pose, "\' == \'true\'"' in launch
+
+
 def test_navigation_applies_tf_offset_without_changing_mapping_default():
     navigation = (
         PACKAGE_ROOT / 'launch' / 'navigation.launch.py'
