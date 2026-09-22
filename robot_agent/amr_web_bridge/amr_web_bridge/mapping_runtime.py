@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import json
 import os
@@ -58,14 +59,20 @@ class MappingRuntime:
             self._phase = phase
             self._detail = detail
 
-    def _ros(self, arguments: list[str], timeout: float = 20.0) -> str:
-        result = self._run(
-            ['ros2', *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+    def _ros(self, arguments: list[str], timeout: float = 8.0) -> str:
+        try:
+            result = self._run(
+                ['ros2', *arguments],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as error:
+            command = ' '.join(['ros2', *arguments])
+            raise RuntimeError(
+                f'ROS command timed out after {timeout:.0f}s: {command}'
+            ) from error
         output = '\n'.join(part.strip() for part in (result.stdout, result.stderr) if part.strip())
         if result.returncode != 0:
             raise RuntimeError(
@@ -74,17 +81,58 @@ class MappingRuntime:
             )
         return output
 
-    def _lifecycle(self, manager: str, command: int) -> None:
+    def _lifecycle(
+        self,
+        manager: str,
+        command: int,
+        *,
+        timeout: float = 8.0,
+    ) -> None:
         output = self._ros([
             'service', 'call', f'/{manager}/manage_nodes',
             'nav2_msgs/srv/ManageLifecycleNodes', f'{{command: {command}}}',
-        ])
+        ], timeout=timeout)
         if 'success=True' not in output and 'success: true' not in output.lower():
             raise RuntimeError(f'{manager} did not confirm the lifecycle transition')
 
     def _lifecycle_node_active(self, node: str) -> bool:
-        output = self._ros(['lifecycle', 'get', f'/{node}'])
+        output = self._ros(
+            ['lifecycle', 'get', f'/{node}'],
+            timeout=4.0,
+        )
         return output.strip().lower().startswith('active ')
+
+    def _active_lifecycle_nodes(self) -> tuple[bool, bool]:
+        """Query Nav2 state concurrently so DDS discovery gets one short budget."""
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            navigation = executor.submit(
+                self._lifecycle_node_active, 'planner_server',
+            )
+            localization = executor.submit(
+                self._lifecycle_node_active, 'amcl',
+            )
+            return navigation.result(), localization.result()
+
+    def _pause_active_lifecycles(
+        self,
+        *,
+        navigation_active: bool,
+        localization_active: bool,
+    ) -> tuple[bool, bool]:
+        """Pause independent Nav2 managers concurrently."""
+        jobs: dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            if navigation_active:
+                jobs['navigation'] = executor.submit(
+                    self._lifecycle, 'lifecycle_manager_navigation', 1,
+                )
+            if localization_active:
+                jobs['localization'] = executor.submit(
+                    self._lifecycle, 'lifecycle_manager_localization', 1,
+                )
+            for job in jobs.values():
+                job.result()
+        return navigation_active, localization_active
 
     def _ensure_lifecycle_started(
         self,
@@ -121,21 +169,24 @@ class MappingRuntime:
             self._session_id = session_id
             self._started_at = datetime.now(timezone.utc).isoformat()
             self._saved_map_id = None
-            self._detail = 'Pausing Nav2 localization and navigation'
+            self._detail = 'Checking Nav2 lifecycle readiness'
         navigation_paused = False
         localization_paused = False
         try:
-            navigation_active = self._lifecycle_node_active('planner_server')
-            localization_active = self._lifecycle_node_active('amcl')
+            navigation_active, localization_active = (
+                self._active_lifecycle_nodes()
+            )
             with self._lock:
                 self._navigation_was_active = navigation_active
                 self._localization_was_active = localization_active
-            if navigation_active:
-                self._lifecycle('lifecycle_manager_navigation', 1)
-                navigation_paused = True
-            if localization_active:
-                self._lifecycle('lifecycle_manager_localization', 1)
-                localization_paused = True
+            self._set('STARTING', 'Pausing active Nav2 lifecycle managers')
+            navigation_paused, localization_paused = (
+                self._pause_active_lifecycles(
+                    navigation_active=navigation_active,
+                    localization_active=localization_active,
+                )
+            )
+            self._set('STARTING', 'Starting SLAM Toolbox')
             launch_arguments = [
                 # Synchronous scan processing avoids an optimization backlog
                 # while the robot is driven interactively from the web UI.
