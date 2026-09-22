@@ -74,6 +74,35 @@ def test_active_map_link_persists_only_a_valid_map_inside_the_catalog(
 
     assert link.is_symlink()
     assert active_map_id_from_link(str(tmp_path), str(link)) == 'ready'
+    catalog = build_map_catalog(str(tmp_path), 'ready', 'robot01')
+    assert [item['id'] for item in catalog['maps']] == ['ready']
+    assert available_map_yaml(str(tmp_path), '.active-map') is None
+
+
+def test_active_map_cannot_be_renamed_or_deleted_via_stale_agent_state(
+    tmp_path: Path,
+):
+    (tmp_path / 'ready.pgm').write_bytes(b'P5\n1 1\n255\n\x00')
+    (tmp_path / 'ready.yaml').write_text(
+        'image: ready.pgm\nresolution: 0.05\n', encoding='utf-8'
+    )
+    link = tmp_path / '.active-map.yaml'
+    set_active_map_link(str(tmp_path), str(link), 'ready')
+
+    for operation in (
+        lambda: rename_map(
+            str(tmp_path), 'ready', 'renamed', str(link),
+        ),
+        lambda: delete_map(str(tmp_path), 'ready', str(link)),
+    ):
+        try:
+            operation()
+        except ValueError as error:
+            assert str(error) == 'The active map cannot be changed'
+        else:
+            raise AssertionError('active map mutation was accepted')
+
+    assert (tmp_path / 'ready.yaml').is_file()
 
 
 def test_missing_or_outside_active_map_link_does_not_select_a_map(tmp_path: Path):

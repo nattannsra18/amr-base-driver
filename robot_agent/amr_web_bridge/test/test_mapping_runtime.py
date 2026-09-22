@@ -4,9 +4,8 @@ import subprocess
 import time
 from types import SimpleNamespace
 
-import yaml
-
 from amr_web_bridge.mapping_runtime import MappingRuntime
+import yaml
 
 
 class FakeProcess:
@@ -123,7 +122,7 @@ def test_mapping_runtime_preserves_start_failure_detail(tmp_path):
 
 def test_mapping_runtime_limits_lifecycle_discovery_and_reports_timeout(tmp_path):
     def run(_arguments, **_kwargs):
-        raise subprocess.TimeoutExpired('ros2 lifecycle get /amcl', 4.0)
+        raise subprocess.TimeoutExpired('ros2 lifecycle get /amcl', 12.0)
 
     runtime = MappingRuntime(
         str(tmp_path),
@@ -134,14 +133,14 @@ def test_mapping_runtime_limits_lifecycle_discovery_and_reports_timeout(tmp_path
     try:
         runtime.start('mapping:robot01:timeout')
     except RuntimeError as error:
-        assert 'timed out after 4s' in str(error)
+        assert 'timed out after 12s' in str(error)
         assert 'ros2 lifecycle get' in str(error)
     else:
         raise AssertionError('lifecycle timeout was not reported')
 
     assert time.monotonic() - started < 1.0
     assert runtime.snapshot(1)['detail'].startswith(
-        'Unable to enter ROS mapping mode: ROS command timed out after 4s'
+        'Unable to enter ROS mapping mode: ROS command timed out after 12s'
     )
 
 

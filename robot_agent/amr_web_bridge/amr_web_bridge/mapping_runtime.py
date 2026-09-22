@@ -98,7 +98,10 @@ class MappingRuntime:
     def _lifecycle_node_active(self, node: str) -> bool:
         output = self._ros(
             ['lifecycle', 'get', f'/{node}'],
-            timeout=4.0,
+            # A freshly restarted ROS graph on the ODROID can take more than
+            # four seconds to discover lifecycle services. The two checks run
+            # concurrently, so this is one bounded discovery window.
+            timeout=12.0,
         )
         return output.strip().lower().startswith('active ')
 

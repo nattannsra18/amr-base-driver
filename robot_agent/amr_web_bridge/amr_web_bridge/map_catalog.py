@@ -10,8 +10,16 @@ from typing import Any
 import yaml
 
 
-MAP_ID_PATTERN = re.compile(r'^[A-Za-z0-9_.-]{1,120}$')
+MAP_ID_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_.-]{0,119}$')
 METADATA_SUFFIX = '.metadata.json'
+
+
+def _catalog_yaml_files(directory: Path) -> list[Path]:
+    """Return real user maps, excluding internal links and hidden files."""
+    return [
+        path for path in sorted(directory.glob('*.yaml'))
+        if not path.name.startswith('.') and not path.is_symlink()
+    ]
 
 
 def _metadata_path(yaml_path: Path) -> Path:
@@ -116,7 +124,7 @@ def build_map_catalog(
         if directory.is_dir():
             records = [
                 read_map_record(path, active_map_id)
-                for path in sorted(directory.glob('*.yaml'))
+                for path in _catalog_yaml_files(directory)
             ]
     return {
         'type': 'map_catalog',
@@ -134,7 +142,10 @@ def available_map_yaml(maps_directory: str, map_id: str) -> Path | None:
     if not directory_value or MAP_ID_PATTERN.fullmatch(map_id) is None:
         return None
     directory = Path(directory_value).expanduser().resolve()
-    candidate = (directory / f'{map_id}.yaml').resolve()
+    unresolved = directory / f'{map_id}.yaml'
+    if unresolved.name.startswith('.') or unresolved.is_symlink():
+        return None
+    candidate = unresolved.resolve()
     if not candidate.is_relative_to(directory) or not candidate.is_file():
         return None
     record = read_map_record(candidate, None)
@@ -145,7 +156,8 @@ def active_map_id_from_link(
     maps_directory: str,
     active_map_link: str,
 ) -> str | None:
-    """Return the validated map selected by the persistent active-map link.
+    """
+    Return the validated map selected by the persistent active-map link.
 
     The symlink is intentionally kept beside the maps rather than pointing a
     systemd service at a timestamped map name.  A missing or unsafe link means
@@ -233,7 +245,24 @@ def update_map_metadata(
         temporary.unlink(missing_ok=True)
 
 
-def rename_map(maps_directory: str, map_id: str, new_map_id: str) -> None:
+def _reject_active_map_change(
+    maps_directory: str,
+    active_map_link: str | None,
+    map_id: str,
+) -> None:
+    if active_map_link and active_map_id_from_link(
+        maps_directory, active_map_link,
+    ) == map_id:
+        raise ValueError('The active map cannot be changed')
+
+
+def rename_map(
+    maps_directory: str,
+    map_id: str,
+    new_map_id: str,
+    active_map_link: str | None = None,
+) -> None:
+    _reject_active_map_change(maps_directory, active_map_link, map_id)
     yaml_path = available_map_yaml(maps_directory, map_id)
     if yaml_path is None:
         raise ValueError('Map is unavailable on the robot')
@@ -253,7 +282,12 @@ def rename_map(maps_directory: str, map_id: str, new_map_id: str) -> None:
         raise
 
 
-def delete_map(maps_directory: str, map_id: str) -> None:
+def delete_map(
+    maps_directory: str,
+    map_id: str,
+    active_map_link: str | None = None,
+) -> None:
+    _reject_active_map_change(maps_directory, active_map_link, map_id)
     yaml_path = available_map_yaml(maps_directory, map_id)
     if yaml_path is None:
         raise ValueError('Map is unavailable on the robot')
@@ -269,7 +303,7 @@ def delete_map(maps_directory: str, map_id: str) -> None:
     _metadata_path(yaml_path).unlink(missing_ok=True)
     if image_path is None or not image_path.is_file():
         return
-    for other_yaml in directory.glob('*.yaml'):
+    for other_yaml in _catalog_yaml_files(directory):
         other = read_map_record(other_yaml, None)
         if other['image_file'] and (
             other_yaml.parent / other['image_file']

@@ -11,6 +11,7 @@ fail() { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 select_map() {
   (($# == 1)) || fail 'select-map requires one map YAML path'
   local candidate map_directory temporary
+  [[ "$1" != "$ACTIVE_MAP_LINK" ]] || fail 'The active-map link is not a map'
   candidate="$(readlink -f -- "$1")"
   map_directory="$(readlink -f -- "$MAPS_DIRECTORY")"
   [[ -f "$candidate" && "$candidate" == "$map_directory"/*.yaml ]] || \
@@ -44,7 +45,6 @@ case "${1:-}" in
   activate-map)
     shift
     select_map "$@"
-    systemctl restart "$NAVIGATION_SERVICE"
     ;;
   select-map)
     shift

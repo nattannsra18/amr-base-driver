@@ -1572,7 +1572,16 @@ class WebBridgeNode(Node):
             },
         )
 
+    def refresh_active_map_id(self) -> None:
+        """Keep runtime state aligned with the persistent robot-side link."""
+        if self.active_map_link:
+            self.active_map_id = active_map_id_from_link(
+                self.maps_directory,
+                self.active_map_link,
+            )
+
     def agent_readiness_snapshot(self) -> dict[str, Any]:
+        self.refresh_active_map_id()
         now = time.monotonic()
         mapping_active = self.mapping_runtime.snapshot(
             self.map_revision
@@ -1769,6 +1778,7 @@ class WebBridgeNode(Node):
             sent_revision = revision
 
     async def send_map_catalog(self, websocket: Any) -> None:
+        self.refresh_active_map_id()
         catalog = build_map_catalog(
             self.maps_directory,
             self.active_map_id,
@@ -2630,11 +2640,20 @@ class WebBridgeNode(Node):
                     new_map_id = message.get('new_map_id')
                     if not isinstance(new_map_id, str):
                         raise ValueError('New map ID is invalid')
-                    rename_map(self.maps_directory, map_id, new_map_id)
+                    rename_map(
+                        self.maps_directory,
+                        map_id,
+                        new_map_id,
+                        self.active_map_link,
+                    )
                     result_map_id = new_map_id
                     detail = 'Map renamed'
                 else:
-                    delete_map(self.maps_directory, map_id)
+                    delete_map(
+                        self.maps_directory,
+                        map_id,
+                        self.active_map_link,
+                    )
                     detail = 'Map deleted'
                 accepted = True
             except (OSError, ValueError) as error:
