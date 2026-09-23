@@ -96,6 +96,71 @@ def test_mapping_runtime_rejects_existing_map(tmp_path):
     assert runtime.snapshot(1)['phase'] == 'REVIEW'
 
 
+def test_mapping_runtime_saves_exact_live_grid_and_activates_it(
+    tmp_path, monkeypatch,
+):
+    activated = []
+    monkeypatch.setattr(
+        'amr_web_bridge.mapping_runtime.os.killpg', lambda *_args: None,
+    )
+    runtime = MappingRuntime(str(tmp_path), sleep=lambda _seconds: None)
+    runtime._phase = 'REVIEW'
+    runtime._process = FakeProcess()
+    runtime._start_map_revision = 7
+
+    runtime.save(
+        'fresh_map',
+        {'name': 'Fresh map'},
+        {
+            'width': 2,
+            'height': 2,
+            'resolution': 0.05,
+            'origin_x': -1.0,
+            'origin_y': 2.0,
+            'origin_yaw': 0.25,
+            'data': [0, 100, -1, 50],
+            'revision': 8,
+        },
+        lambda path: activated.append(path),
+    )
+
+    assert activated == [tmp_path / 'fresh_map.yaml']
+    assert (tmp_path / 'fresh_map.pgm').read_bytes() == (
+        b'P5\n2 2\n255\n' + bytes([205, 205, 254, 0])
+    )
+    saved = yaml.safe_load(
+        (tmp_path / 'fresh_map.yaml').read_text(encoding='utf-8')
+    )
+    assert saved['image'] == 'fresh_map.pgm'
+    assert saved['origin'] == [-1.0, 2.0, 0.25]
+    assert runtime.snapshot(9)['phase'] == 'IDLE'
+    assert runtime.snapshot(9)['saved_map_id'] == 'fresh_map'
+
+
+def test_mapping_runtime_rejects_stale_grid_from_before_session(tmp_path):
+    runtime = MappingRuntime(str(tmp_path), sleep=lambda _seconds: None)
+    runtime._phase = 'REVIEW'
+    runtime._start_map_revision = 9
+
+    try:
+        runtime.save(
+            'stale_map',
+            {'name': 'Stale map'},
+            {
+                'width': 1,
+                'height': 1,
+                'resolution': 0.05,
+                'data': [0],
+                'revision': 9,
+            },
+        )
+    except RuntimeError as error:
+        assert str(error) == 'Waiting for the first map from this SLAM session'
+    else:
+        raise AssertionError('stale pre-session map was saved')
+    assert runtime.snapshot(9)['phase'] == 'REVIEW'
+
+
 def test_mapping_runtime_preserves_start_failure_detail(tmp_path):
     def run(_arguments, **_kwargs):
         raise RuntimeError('localization lifecycle service timed out')

@@ -38,6 +38,7 @@ class MappingRuntime:
         self._detail: str | None = None
         self._started_at: str | None = None
         self._saved_map_id: str | None = None
+        self._start_map_revision: int | None = None
         self._navigation_was_active = False
         self._localization_was_active = False
 
@@ -164,7 +165,11 @@ class MappingRuntime:
             f'{last_error}'
         ) from last_error
 
-    def start(self, session_id: str) -> None:
+    def start(
+        self,
+        session_id: str,
+        initial_map_revision: int | None = None,
+    ) -> None:
         with self._lock:
             if self._phase not in {'IDLE', 'FAILED'}:
                 raise ValueError('A mapping session is already active')
@@ -172,6 +177,7 @@ class MappingRuntime:
             self._session_id = session_id
             self._started_at = datetime.now(timezone.utc).isoformat()
             self._saved_map_id = None
+            self._start_map_revision = initial_map_revision
             self._detail = 'Checking Nav2 lifecycle readiness'
         navigation_paused = False
         localization_paused = False
@@ -239,7 +245,13 @@ class MappingRuntime:
         # pause service, whose CLI client can block intermittently under DDS.
         self._set('REVIEW', 'Robot stopped; captured map is ready for review')
 
-    def save(self, map_id: str, metadata: dict[str, Any]) -> None:
+    def save(
+        self,
+        map_id: str,
+        metadata: dict[str, Any],
+        occupancy_map: dict[str, Any] | None = None,
+        activate_saved_map: Callable[[Path], None] | None = None,
+    ) -> None:
         with self._lock:
             if self._phase != 'REVIEW':
                 raise ValueError('Stop map capture before saving')
@@ -262,19 +274,31 @@ class MappingRuntime:
             self._set('REVIEW', 'Map ID already exists')
             raise ValueError('Map ID already exists')
         try:
-            self._ros([
-                'service', 'call', '/slam_toolbox/save_map',
-                'slam_toolbox/srv/SaveMap',
-                json.dumps({'name': {'data': str(target)}}),
-            ], timeout=30.0)
+            if occupancy_map is None:
+                self._ros([
+                    'service', 'call', '/slam_toolbox/save_map',
+                    'slam_toolbox/srv/SaveMap',
+                    json.dumps({'name': {'data': str(target)}}),
+                ], timeout=30.0)
+            else:
+                self._write_occupancy_map(target, occupancy_map)
             yaml_path = available_map_yaml(self.maps_directory, map_id)
             if yaml_path is None:
                 raise RuntimeError('Saved map files failed validation')
             update_map_metadata(self.maps_directory, map_id, metadata)
             with self._lock:
                 self._saved_map_id = map_id
-            self._restore()
-            self._set('IDLE', 'Map saved and Nav2 localization restored')
+            if activate_saved_map is None:
+                self._restore()
+                detail = 'Map saved and Nav2 localization restored'
+            else:
+                self._stop_slam_process()
+                activate_saved_map(yaml_path)
+                with self._lock:
+                    self._localization_was_active = False
+                    self._navigation_was_active = False
+                detail = 'Map saved and activated; set the Initial Pose to localize'
+            self._set('IDLE', detail)
         except Exception:
             with self._lock:
                 saved = self._saved_map_id is not None
@@ -287,6 +311,81 @@ class MappingRuntime:
                 ),
             )
             raise
+
+    def _write_occupancy_map(
+        self,
+        target: Path,
+        occupancy_map: dict[str, Any],
+    ) -> None:
+        """
+        Persist the exact live SLAM frame already received by the agent.
+
+        Calling ``/slam_toolbox/save_map`` through a newly discovered ROS CLI
+        participant can take tens of seconds on the ODROID and, when an old
+        transient-local ``/map`` sample is still present, has saved that stale
+        map.  The agent already owns the current OccupancyGrid, so write that
+        immutable snapshot directly and atomically.
+        """
+        width = int(occupancy_map.get('width', 0))
+        height = int(occupancy_map.get('height', 0))
+        resolution = float(occupancy_map.get('resolution', 0.0))
+        data = occupancy_map.get('data')
+        revision = occupancy_map.get('revision')
+        if (
+            width <= 0
+            or height <= 0
+            or resolution <= 0.0
+            or not isinstance(data, list)
+            or len(data) != width * height
+        ):
+            raise RuntimeError('The live SLAM map is incomplete')
+        if (
+            self._start_map_revision is not None
+            and isinstance(revision, int)
+            and revision <= self._start_map_revision
+        ):
+            raise RuntimeError('Waiting for the first map from this SLAM session')
+
+        pgm_path = target.with_suffix('.pgm')
+        yaml_path = target.with_suffix('.yaml')
+        pgm_temp = pgm_path.with_suffix('.pgm.tmp')
+        yaml_temp = yaml_path.with_suffix('.yaml.tmp')
+        pixels = bytearray()
+        for row in range(height - 1, -1, -1):
+            offset = row * width
+            for value in data[offset:offset + width]:
+                occupancy = int(value)
+                if occupancy < 0:
+                    pixels.append(205)
+                elif occupancy >= 65:
+                    pixels.append(0)
+                elif occupancy <= 25:
+                    pixels.append(254)
+                else:
+                    pixels.append(205)
+        pgm_temp.write_bytes(
+            f'P5\n{width} {height}\n255\n'.encode('ascii') + pixels
+        )
+        origin = [
+            float(occupancy_map.get('origin_x', 0.0)),
+            float(occupancy_map.get('origin_y', 0.0)),
+            float(occupancy_map.get('origin_yaw', 0.0)),
+        ]
+        yaml_temp.write_text(
+            '\n'.join((
+                f'image: {pgm_path.name}',
+                'mode: trinary',
+                f'resolution: {resolution}',
+                f'origin: [{origin[0]}, {origin[1]}, {origin[2]}]',
+                'negate: 0',
+                'occupied_thresh: 0.65',
+                'free_thresh: 0.25',
+                '',
+            )),
+            encoding='utf-8',
+        )
+        os.replace(pgm_temp, pgm_path)
+        os.replace(yaml_temp, yaml_path)
 
     def discard(self) -> None:
         with self._lock:
@@ -307,11 +406,19 @@ class MappingRuntime:
             self._detail = 'Captured map discarded and Nav2 localization restored'
 
     def _restore(self) -> None:
+        self._stop_slam_process()
+        with self._lock:
+            localization_was_active = self._localization_was_active
+            navigation_was_active = self._navigation_was_active
+        self._resume_lifecycles(
+            localization_was_active,
+            navigation_was_active,
+        )
+
+    def _stop_slam_process(self) -> None:
         with self._lock:
             process = self._process
             self._process = None
-            localization_was_active = self._localization_was_active
-            navigation_was_active = self._navigation_was_active
         if process is not None and process.poll() is None:
             try:
                 os.killpg(process.pid, signal.SIGINT)
@@ -320,6 +427,12 @@ class MappingRuntime:
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGTERM)
                     process.wait(timeout=5.0)
+
+    def _resume_lifecycles(
+        self,
+        localization_was_active: bool,
+        navigation_was_active: bool,
+    ) -> None:
         if localization_was_active:
             self._ensure_lifecycle_started(
                 'lifecycle_manager_localization', 'amcl',

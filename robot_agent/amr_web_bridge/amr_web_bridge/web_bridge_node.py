@@ -1331,6 +1331,33 @@ class WebBridgeNode(Node):
             f'{message.info.width}x{message.info.height}'
         )
 
+    def mapping_map_snapshot(self) -> dict[str, Any]:
+        """Copy the latest live map so saving cannot observe later changes."""
+        with self.map_lock:
+            if self.latest_map is None:
+                raise RuntimeError('Waiting for the live SLAM map')
+            return {
+                **self.latest_map,
+                'data': list(self.latest_map['data']),
+                'revision': self.map_revision,
+            }
+
+    def activate_saved_mapping_map(self, yaml_path: FilePath) -> None:
+        """Persist and start Nav2 with a map produced by this SLAM session."""
+        # Remove the prior transient-local map before Nav2 starts with the new
+        # file, otherwise the dashboard can briefly revert to the old map.
+        with self.map_lock:
+            self.latest_map = None
+            self.map_revision += 1
+        succeeded, output = self.navigation_recovery_runner.activate_map(
+            str(yaml_path)
+        )
+        if not succeeded:
+            raise RuntimeError(
+                output or 'Unable to activate the newly saved map'
+            )
+        self.active_map_id = yaml_path.stem
+
     @staticmethod
     def message_timestamp(message: Any) -> str:
         stamp = message.header.stamp
@@ -2155,7 +2182,11 @@ class WebBridgeNode(Node):
                 ):
                     raise ValueError('Navigation, route preview, or map switching is active')
                 self.capture_mapping_pose_reference()
-                await asyncio.to_thread(self.mapping_runtime.start, session_id)
+                await asyncio.to_thread(
+                    self.mapping_runtime.start,
+                    session_id,
+                    self.map_revision,
+                )
             elif action == 'STOP':
                 self.publish_zero_velocity()
                 await asyncio.to_thread(self.mapping_runtime.stop_capture)
@@ -2165,8 +2196,19 @@ class WebBridgeNode(Node):
                 if not isinstance(map_id, str) or not isinstance(metadata, dict):
                     raise ValueError('Map ID and metadata are required')
                 self.publish_zero_velocity()
-                await asyncio.to_thread(self.mapping_runtime.save, map_id, metadata)
-                self.restore_mapping_pose_estimate()
+                occupancy_map = self.mapping_map_snapshot()
+                activate_saved_map = (
+                    self.activate_saved_mapping_map
+                    if self.active_map_link else None
+                )
+                await asyncio.to_thread(
+                    self.mapping_runtime.save,
+                    map_id,
+                    metadata,
+                    occupancy_map,
+                    activate_saved_map,
+                )
+                self.mapping_pose_reference = None
                 await self.send_map_catalog(websocket)
             else:
                 self.publish_zero_velocity()
