@@ -20,7 +20,7 @@ from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from lifecycle_msgs.srv import GetState
-from nav2_msgs.action import ComputePathToPose, NavigateToPose
+from nav2_msgs.action import ComputePathToPose, NavigateToPose, Spin
 from nav2_msgs.srv import ClearEntireCostmap, LoadMap, ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 import rclpy
@@ -145,6 +145,7 @@ class WebBridgeNode(Node):
         self.declare_parameter('localization_scan_angular_speed', 0.26)
         self.declare_parameter('localization_scan_timeout_seconds', 28.0)
         self.declare_parameter('blocked_start_recovery_window_seconds', 90.0)
+        self.declare_parameter('near_goal_acceptance_distance_m', 0.35)
 
         self.server_url = str(
             self.get_parameter('server_url').value
@@ -371,6 +372,15 @@ class WebBridgeNode(Node):
                 ).value),
             ),
         )
+        self.near_goal_acceptance_distance_m = min(
+            0.5,
+            max(
+                0.15,
+                float(self.get_parameter(
+                    'near_goal_acceptance_distance_m'
+                ).value),
+            ),
+        )
         self.websocket_uri = (
             f'{self.server_url}/ws/robots/{self.robot_id}'
         )
@@ -410,6 +420,8 @@ class WebBridgeNode(Node):
         self.last_localization_monotonic: float | None = None
         self.amcl_state = 'UNKNOWN'
         self.amcl_state_future: Any = None
+        self.amcl_state_request_started_monotonic: float | None = None
+        self.amcl_state_last_success_monotonic: float | None = None
         self.localization_recovery_count = 0
         self.localization_recovery_active = False
         self.localization_recovery_started_monotonic: float | None = None
@@ -462,6 +474,8 @@ class WebBridgeNode(Node):
         self.mapping_runtime = MappingRuntime(
             self.maps_directory,
             slam_params_file=mapping_params_file,
+            lifecycle_state=self.mapping_lifecycle_node_active,
+            lifecycle_command=self.mapping_lifecycle_command,
         )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -589,6 +603,7 @@ class WebBridgeNode(Node):
             ComputePathToPose,
             self.compute_path_action,
         )
+        self.recovery_spin_client = ActionClient(self, Spin, '/spin')
         self.load_map_client = self.create_client(
             LoadMap,
             self.load_map_service,
@@ -601,6 +616,10 @@ class WebBridgeNode(Node):
             ManageLifecycleNodes,
             '/lifecycle_manager_localization/manage_nodes',
         )
+        self.navigation_lifecycle_client = self.create_client(
+            ManageLifecycleNodes,
+            '/lifecycle_manager_navigation/manage_nodes',
+        )
         self.global_localization_client = self.create_client(
             EmptyService,
             self.global_localization_service,
@@ -610,8 +629,24 @@ class WebBridgeNode(Node):
         # a pre-stall needs to be handled.
         self.recovery_lifecycle_clients = [
             (name, self.create_client(GetState, f'{name}/get_state'))
-            for name in ('/planner_server', '/controller_server', '/bt_navigator')
+            for name in (
+                '/planner_server',
+                '/controller_server',
+                '/behavior_server',
+                '/bt_navigator',
+            )
         ]
+        self.mapping_lifecycle_clients = {
+            name.removeprefix('/'): client
+            for name, client in self.recovery_lifecycle_clients
+        }
+        self.mapping_lifecycle_clients['amcl'] = self.amcl_state_client
+        self.mapping_lifecycle_manager_clients = {
+            'lifecycle_manager_localization': (
+                self.localization_lifecycle_client
+            ),
+            'lifecycle_manager_navigation': self.navigation_lifecycle_client,
+        }
         self.recovery_costmap_clients = [
             (name, self.create_client(ClearEntireCostmap, name))
             for name in (
@@ -626,6 +661,10 @@ class WebBridgeNode(Node):
         self.finish_motor_recovery_client = self.create_client(
             SetBool,
             '/finish_motor_recovery',
+        )
+        self.guarded_reverse_client = self.create_client(
+            Trigger,
+            '/guarded_reverse_escape',
         )
         self.command_timer = self.create_timer(
             0.1,
@@ -1019,18 +1058,35 @@ class WebBridgeNode(Node):
         self.initial_pose_publisher.publish(message)
 
     def poll_amcl_state(self) -> None:
+        now = time.monotonic()
         future = self.amcl_state_future
         if future is not None and not future.done():
-            return
+            started = self.amcl_state_request_started_monotonic
+            if started is None or now - started <= 3.0:
+                return
+            # A lost lifecycle response used to leave this future pending
+            # forever, pinning readiness at UNKNOWN even after AMCL recovered.
+            # Retire it and let the warm client issue a fresh request.
+            try:
+                future.cancel()
+            except Exception:
+                pass
+            self.amcl_state_future = None
+            self.amcl_state_request_started_monotonic = None
         if not self.amcl_state_client.service_is_ready():
-            with self.localization_lock:
-                self.amcl_state = 'UNKNOWN'
+            last_success = self.amcl_state_last_success_monotonic
+            if last_success is None or now - last_success > 5.0:
+                with self.localization_lock:
+                    self.amcl_state = 'UNKNOWN'
             return
         future = self.amcl_state_client.call_async(GetState.Request())
         self.amcl_state_future = future
+        self.amcl_state_request_started_monotonic = now
         future.add_done_callback(self.amcl_state_callback)
 
     def amcl_state_callback(self, future: Any) -> None:
+        if future is not self.amcl_state_future:
+            return
         try:
             lifecycle_state = future.result().current_state
             label = str(lifecycle_state.label).strip().lower()
@@ -1039,8 +1095,19 @@ class WebBridgeNode(Node):
                 if int(lifecycle_state.id) == 3 or label == 'active'
                 else 'INACTIVE'
             )
+            self.amcl_state_last_success_monotonic = time.monotonic()
         except Exception:
+            last_success = self.amcl_state_last_success_monotonic
+            if (
+                last_success is not None
+                and time.monotonic() - last_success <= 5.0
+            ):
+                return
             state = 'UNKNOWN'
+        finally:
+            if future is self.amcl_state_future:
+                self.amcl_state_future = None
+                self.amcl_state_request_started_monotonic = None
         with self.localization_lock:
             self.amcl_state = state
 
@@ -3503,6 +3570,56 @@ class WebBridgeNode(Node):
                 return False, f'{name}: {response.current_state.label}'
         return True, 'Navigation lifecycle nodes are active'
 
+    def mapping_lifecycle_node_active(self, node: str) -> bool:
+        """Read a mapping prerequisite through this node's warm ROS client."""
+        clients = getattr(self, 'mapping_lifecycle_clients', {})
+        client = clients.get(str(node).removeprefix('/'))
+        if client is None:
+            raise RuntimeError(f'Lifecycle client is unavailable for {node}')
+        response, detail = call_service(
+            client,
+            GetState.Request(),
+            timeout_seconds=4.0,
+        )
+        if response is None:
+            raise RuntimeError(f'Unable to read {node} lifecycle state: {detail}')
+        return int(response.current_state.id) == 3
+
+    def mapping_lifecycle_command(self, manager: str, command: int) -> None:
+        """Transition a lifecycle manager without spawning a ROS CLI process."""
+        clients = getattr(self, 'mapping_lifecycle_manager_clients', {})
+        client = clients.get(str(manager).removeprefix('/'))
+        if client is None:
+            raise RuntimeError(f'Lifecycle manager is unavailable: {manager}')
+        request = ManageLifecycleNodes.Request()
+        request.command = int(command)
+        response, detail = call_service(
+            client,
+            request,
+            timeout_seconds=15.0,
+        )
+        if response is None:
+            raise RuntimeError(f'{manager} transition failed: {detail}')
+        if not bool(response.success):
+            raise RuntimeError(
+                f'{manager} did not confirm the lifecycle transition'
+            )
+
+    def wait_for_recovery_lifecycle(
+        self,
+        timeout_seconds: float = 18.0,
+        poll_seconds: float = 0.25,
+    ) -> tuple[bool, str]:
+        """Wait through one bounded Nav2 lifecycle-manager recovery cycle."""
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        detail = 'Nav2 lifecycle state is unavailable'
+        while time.monotonic() < deadline:
+            healthy, detail = self.recovery_lifecycle_healthy()
+            if healthy:
+                return True, detail
+            time.sleep(max(0.0, float(poll_seconds)))
+        return False, detail
+
     def clear_recovery_costmaps(self) -> tuple[bool, str]:
         """Worker-thread only: reuse discovered clients instead of spawning CLI."""
         for name, client in self.recovery_costmap_clients:
@@ -3510,6 +3627,96 @@ class WebBridgeNode(Node):
             if not ok:
                 return False, f'{name}: {detail}'
         return True, 'Local and global costmaps cleared'
+
+    def guarded_reverse_for_recovery(self) -> tuple[bool, str]:
+        """Run the independent scan-guarded reverse without a CLI process."""
+        client = getattr(self, 'guarded_reverse_client', None)
+        if client is None:
+            return self.navigation_recovery_runner.guarded_reverse()
+        return WebBridgeNode._service_response(
+            client,
+            Trigger.Request(),
+            timeout_seconds=6.0,
+        )
+
+    def spin_for_recovery(
+        self,
+        yaw: float,
+        timeout_seconds: float = 8.0,
+    ) -> tuple[bool, str]:
+        """Run one short collision-checked Nav2 turn from a worker thread."""
+        client = getattr(self, 'recovery_spin_client', None)
+        if client is None:
+            return self.navigation_recovery_runner.spin(yaw)
+        if not client.wait_for_server(timeout_sec=1.0):
+            return False, 'Spin action is unavailable'
+
+        completed = threading.Event()
+        result: dict[str, Any] = {
+            'success': False,
+            'detail': 'Spin returned no result',
+            'closed': False,
+        }
+        result_lock = threading.Lock()
+
+        def finish(success: bool, detail: str) -> None:
+            with result_lock:
+                if result['closed']:
+                    return
+                result['success'] = success
+                result['detail'] = detail
+                result['closed'] = True
+            completed.set()
+
+        def receive_result(future: Any) -> None:
+            try:
+                wrapped = future.result()
+                action_result = wrapped.result
+            except Exception as error:
+                finish(False, f'Spin result failed: {error}')
+                return
+            error_code = int(getattr(action_result, 'error_code', 0))
+            if wrapped.status == GoalStatus.STATUS_SUCCEEDED and error_code == 0:
+                finish(True, f'Completed a bounded {float(yaw):.2f} rad turn')
+                return
+            finish(
+                False,
+                f'Spin stopped (error_code: {error_code}, '
+                f'goal_status: {wrapped.status})',
+            )
+
+        def receive_goal(future: Any) -> None:
+            try:
+                goal_handle = future.result()
+            except Exception as error:
+                finish(False, f'Spin request failed: {error}')
+                return
+            if not goal_handle.accepted:
+                finish(False, 'Spin request was rejected')
+                return
+            with result_lock:
+                result['goal_handle'] = goal_handle
+            goal_handle.get_result_async().add_done_callback(receive_result)
+
+        goal = Spin.Goal()
+        goal.target_yaw = float(yaw)
+        goal.time_allowance.sec = 5
+        try:
+            client.send_goal_async(goal).add_done_callback(receive_goal)
+        except Exception as error:
+            return False, f'Spin request failed: {error}'
+
+        if not completed.wait(timeout=max(0.1, float(timeout_seconds))):
+            with result_lock:
+                result['closed'] = True
+                goal_handle = result.get('goal_handle')
+            if goal_handle is not None:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+            return False, f'Spin timed out after {float(timeout_seconds):.1f} seconds'
+        return bool(result['success']), str(result['detail'])
 
     def recover_navigation(self, operation: dict[str, Any]) -> tuple[bool, str]:
         mapping_phase = self.mapping_runtime.snapshot(self.map_revision).get('phase')
@@ -3638,6 +3845,70 @@ class WebBridgeNode(Node):
         ).start()
         return True
 
+    def accept_aborted_goal_when_near(
+        self,
+        command: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Accept a blocked Nav2 goal only when the robot is safely nearby."""
+        if self.motion_stop_latched():
+            return False, 'an emergency stop is latched'
+
+        target = command.get('target')
+        if not isinstance(target, dict) or str(target.get('frame_id')) != 'map':
+            return False, 'the navigation target is not in the map frame'
+        try:
+            target_x = float(target['x'])
+            target_y = float(target['y'])
+        except (KeyError, TypeError, ValueError):
+            return False, 'the navigation target is invalid'
+        if not math.isfinite(target_x) or not math.isfinite(target_y):
+            return False, 'the navigation target is invalid'
+
+        localization = self.localization_snapshot()
+        pose = localization.get('pose')
+        if (
+            localization.get('health') != 'LOCALIZED'
+            or localization.get('amcl_state') != 'ACTIVE'
+            or not localization.get('tf_available')
+            or not isinstance(pose, dict)
+            or str(pose.get('frame_id')) != 'map'
+        ):
+            return False, (
+                'localization is not ready '
+                f'({localization.get("detail") or localization.get("health")})'
+            )
+
+        fault = self.motor_fault_snapshot()
+        if fault is None or not fault.get('motors_enabled'):
+            return False, 'ESP32 diagnostics are unavailable or motors are disabled'
+        if (
+            int(fault.get('mcu_fault', -1)) != 0
+            or str(fault.get('host_motion_fault', '')).strip()
+            or str(fault.get('host_motion_state', '')).strip().upper()
+            not in {'', 'NORMAL'}
+        ):
+            return False, 'motor diagnostics are not normal'
+
+        try:
+            distance = math.hypot(
+                float(pose['x']) - target_x,
+                float(pose['y']) - target_y,
+            )
+        except (KeyError, TypeError, ValueError):
+            return False, 'the localized robot position is invalid'
+        if not math.isfinite(distance):
+            return False, 'the localized robot position is invalid'
+        if distance > self.near_goal_acceptance_distance_m:
+            return False, (
+                f'robot is {distance:.2f} m from the goal, outside the '
+                f'{self.near_goal_acceptance_distance_m:.2f} m acceptance radius'
+            )
+
+        return True, (
+            f'Accepted arrival {distance:.2f} m from the goal after Nav2 was '
+            'blocked near the destination'
+        )
+
     def run_blocked_pose_recovery(
         self,
         command: dict[str, Any],
@@ -3651,7 +3922,7 @@ class WebBridgeNode(Node):
                 'started',
                 'Nav2 reported a blocked start; checking a guarded reverse escape',
             )
-            escaped, escape_output = self.navigation_recovery_runner.guarded_reverse()
+            escaped, escape_output = self.guarded_reverse_for_recovery()
             if not escaped:
                 detail = (
                     f'{original_detail}; guarded reverse was stopped or refused '
@@ -3662,6 +3933,35 @@ class WebBridgeNode(Node):
                 )
                 self.send_navigation_result(command, 'aborted', detail[:500])
                 return
+
+            lifecycle_ok, lifecycle_detail = self.wait_for_recovery_lifecycle()
+            if not lifecycle_ok:
+                detail = (
+                    'Guarded reverse completed, but Nav2 did not return to an '
+                    f'active state: {lifecycle_detail}'
+                )
+                self.get_logger().error(
+                    f'Blocked-pose recovery for {command_id} failed: {detail}'
+                )
+                self.send_navigation_result(command, 'aborted', detail[:500])
+                return
+
+            turn = self.stall_escape_decision(prefer_turn=True)
+            if turn.action == 'spin':
+                turned, turn_output = self.spin_for_recovery(turn.value)
+                if turned:
+                    self.get_logger().warning(
+                        f'Blocked-pose recovery for {command_id} completed '
+                        f'a scan-gated turn: {turn.detail}'
+                    )
+                else:
+                    # The turn is an additional escape opportunity. A refused
+                    # turn must remain stopped, but a fresh route may still be
+                    # safe after the completed guarded reverse.
+                    self.get_logger().warning(
+                        f'Optional turn for {command_id} was not completed: '
+                        f'{turn_output}'
+                    )
 
             cleared, clear_output = self.clear_recovery_costmaps()
             if not cleared:
@@ -3677,6 +3977,19 @@ class WebBridgeNode(Node):
                 return
 
             planned, plan_output = self.compute_recovery_path(command['target'])
+            if not planned and 'request was rejected' in plan_output.lower():
+                lifecycle_ok, lifecycle_detail = self.wait_for_recovery_lifecycle()
+                if lifecycle_ok:
+                    cleared, clear_output = self.clear_recovery_costmaps()
+                    if cleared:
+                        planned, plan_output = self.compute_recovery_path(
+                            command['target']
+                        )
+                else:
+                    plan_output = (
+                        f'{plan_output}; Nav2 lifecycle did not recover: '
+                        f'{lifecycle_detail}'
+                    )
             if not planned:
                 failure = classify_plan_failure(plan_output)
                 detail = (
@@ -5167,11 +5480,18 @@ class WebBridgeNode(Node):
                 f'{command_id}: {detail}'
             )
 
-        if (
-            navigation_status == 'aborted'
-            and self.maybe_start_blocked_pose_recovery(command, detail)
-        ):
-            return
+        if navigation_status == 'aborted':
+            accepted_near_goal, near_goal_detail = (
+                self.accept_aborted_goal_when_near(command)
+            )
+            if accepted_near_goal:
+                navigation_status = 'succeeded'
+                detail = near_goal_detail
+                self.get_logger().warning(
+                    f'Navigation accepted near goal for {command_id}: {detail}'
+                )
+            elif self.maybe_start_blocked_pose_recovery(command, detail):
+                return
 
         self.send_navigation_result(
             command,

@@ -113,6 +113,7 @@ def test_navigation_launch_starts_and_manages_behavior_server():
     assert "package='nav2_behaviors'" in launch
     assert "executable='behavior_server'" in launch
     assert "remappings=[('cmd_vel', '/cmd_vel_nav')]" in launch
+    assert "'bond_timeout': 10.0" in launch
     assert "'behavior_server'," in launch
 
 

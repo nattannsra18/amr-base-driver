@@ -111,6 +111,10 @@ def generate_launch_description():
         condition=IfCondition(start_navigation),
         parameters=[{
             'autostart': False,
+            # The ODROID-C4 can briefly miss a 4 s bond heartbeat while DDS
+            # recovery work is active. Keep detection bounded without tearing
+            # down a healthy stack during one transient scheduler stall.
+            'bond_timeout': 10.0,
             'node_names': [
                 'controller_server',
                 'planner_server',

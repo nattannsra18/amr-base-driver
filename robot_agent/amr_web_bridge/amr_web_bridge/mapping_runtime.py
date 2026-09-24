@@ -25,12 +25,16 @@ class MappingRuntime:
         run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         popen: Callable[..., subprocess.Popen[Any]] = subprocess.Popen,
         sleep: Callable[[float], None] = time.sleep,
+        lifecycle_state: Callable[[str], bool] | None = None,
+        lifecycle_command: Callable[[str, int], None] | None = None,
     ) -> None:
         self.maps_directory = maps_directory
         self.slam_params_file = slam_params_file
         self._run = run
         self._popen = popen
         self._sleep = sleep
+        self._lifecycle_state = lifecycle_state
+        self._lifecycle_command = lifecycle_command
         self._lock = Lock()
         self._process: subprocess.Popen[Any] | None = None
         self._session_id: str | None = None
@@ -89,6 +93,9 @@ class MappingRuntime:
         *,
         timeout: float = 8.0,
     ) -> None:
+        if self._lifecycle_command is not None:
+            self._lifecycle_command(manager, command)
+            return
         output = self._ros([
             'service', 'call', f'/{manager}/manage_nodes',
             'nav2_msgs/srv/ManageLifecycleNodes', f'{{command: {command}}}',
@@ -97,6 +104,8 @@ class MappingRuntime:
             raise RuntimeError(f'{manager} did not confirm the lifecycle transition')
 
     def _lifecycle_node_active(self, node: str) -> bool:
+        if self._lifecycle_state is not None:
+            return self._lifecycle_state(node)
         output = self._ros(
             ['lifecycle', 'get', f'/{node}'],
             # A freshly restarted ROS graph on the ODROID can take more than
@@ -116,27 +125,6 @@ class MappingRuntime:
                 self._lifecycle_node_active, 'amcl',
             )
             return navigation.result(), localization.result()
-
-    def _pause_active_lifecycles(
-        self,
-        *,
-        navigation_active: bool,
-        localization_active: bool,
-    ) -> tuple[bool, bool]:
-        """Pause independent Nav2 managers concurrently."""
-        jobs: dict[str, Any] = {}
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            if navigation_active:
-                jobs['navigation'] = executor.submit(
-                    self._lifecycle, 'lifecycle_manager_navigation', 1,
-                )
-            if localization_active:
-                jobs['localization'] = executor.submit(
-                    self._lifecycle, 'lifecycle_manager_localization', 1,
-                )
-            for job in jobs.values():
-                job.result()
-        return navigation_active, localization_active
 
     def _ensure_lifecycle_started(
         self,
@@ -189,12 +177,14 @@ class MappingRuntime:
                 self._navigation_was_active = navigation_active
                 self._localization_was_active = localization_active
             self._set('STARTING', 'Pausing active Nav2 lifecycle managers')
-            navigation_paused, localization_paused = (
-                self._pause_active_lifecycles(
-                    navigation_active=navigation_active,
-                    localization_active=localization_active,
-                )
-            )
+            # Pause sequentially so a failure in the second transition cannot
+            # hide the first successful pause from the rollback path.
+            if navigation_active:
+                self._lifecycle('lifecycle_manager_navigation', 1)
+                navigation_paused = True
+            if localization_active:
+                self._lifecycle('lifecycle_manager_localization', 1)
+                localization_paused = True
             self._set('STARTING', 'Starting SLAM Toolbox')
             launch_arguments = [
                 # Synchronous scan processing avoids an optimization backlog

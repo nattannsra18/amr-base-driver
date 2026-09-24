@@ -136,7 +136,45 @@ def test_amcl_state_callback_accepts_active_lifecycle_id():
     future = SimpleNamespace(result=lambda: SimpleNamespace(
         current_state=SimpleNamespace(id=3, label='ACTIVE '),
     ))
+    value.amcl_state_future = future
+    value.amcl_state_request_started_monotonic = time.monotonic()
+    value.amcl_state_last_success_monotonic = None
     WebBridgeNode.amcl_state_callback(value, future)
+    assert value.amcl_state == 'ACTIVE'
+    assert value.amcl_state_future is None
+    assert value.amcl_state_last_success_monotonic is not None
+
+
+def test_amcl_state_poll_retries_a_stuck_lifecycle_request():
+    value = bridge()
+    stuck = SimpleNamespace(done=lambda: False, cancel=lambda: None)
+    replacement = SimpleNamespace(add_done_callback=lambda callback: None)
+    value.amcl_state_future = stuck
+    value.amcl_state_request_started_monotonic = time.monotonic() - 4.0
+    value.amcl_state_last_success_monotonic = None
+    value.amcl_state_client = SimpleNamespace(
+        service_is_ready=lambda: True,
+        call_async=lambda request: replacement,
+    )
+    value.amcl_state_callback = (
+        lambda future: WebBridgeNode.amcl_state_callback(value, future)
+    )
+
+    WebBridgeNode.poll_amcl_state(value)
+
+    assert value.amcl_state_future is replacement
+    assert value.amcl_state_request_started_monotonic is not None
+
+
+def test_transient_amcl_service_loss_keeps_recent_active_state():
+    value = bridge()
+    value.amcl_state_future = None
+    value.amcl_state_request_started_monotonic = None
+    value.amcl_state_last_success_monotonic = time.monotonic()
+    value.amcl_state_client = SimpleNamespace(service_is_ready=lambda: False)
+
+    WebBridgeNode.poll_amcl_state(value)
+
     assert value.amcl_state == 'ACTIVE'
 
 

@@ -147,6 +147,35 @@ class RecoveryPlanClient:
         return ImmediateFuture(AcceptedRecoveryGoal())
 
 
+class AcceptedSpinGoal:
+    accepted = True
+
+    def get_result_async(self):
+        return ImmediateFuture(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(error_code=0),
+        ))
+
+
+class RecoverySpinClient:
+    def wait_for_server(self, timeout_sec):
+        return timeout_sec == 1.0
+
+    def send_goal_async(self, goal):
+        self.goal = goal
+        return ImmediateFuture(AcceptedSpinGoal())
+
+
+def test_native_recovery_spin_is_bounded_and_reports_success():
+    client = RecoverySpinClient()
+    node = SimpleNamespace(recovery_spin_client=client)
+    turned, detail = WebBridgeNode.spin_for_recovery(node, 0.26)
+    assert turned
+    assert detail == 'Completed a bounded 0.26 rad turn'
+    assert client.goal.target_yaw == 0.26
+    assert client.goal.time_allowance.sec == 5
+
+
 def test_native_recovery_plan_reports_connected_path():
     node = SimpleNamespace(recovery_plan_client=RecoveryPlanClient())
     node.build_recovery_plan_goal = lambda _target: object()
@@ -180,3 +209,125 @@ def test_native_recovery_plan_has_bounded_timeout():
 
     assert planned is False
     assert detail.startswith('Planner timeout:')
+
+
+def near_goal_bridge(distance=0.28, *, localized=True, faulted=False):
+    value = SimpleNamespace(
+        near_goal_acceptance_distance_m=0.35,
+        motion_stop_latched=lambda: False,
+        localization_snapshot=lambda: {
+            'health': 'LOCALIZED' if localized else 'LOST',
+            'amcl_state': 'ACTIVE' if localized else 'INACTIVE',
+            'tf_available': localized,
+            'pose': {
+                'frame_id': 'map',
+                'x': distance,
+                'y': 0.0,
+                'yaw': 0.0,
+            },
+            'detail': 'ready' if localized else 'AMCL is inactive',
+        },
+        motor_fault_snapshot=lambda: {
+            'mcu_fault': 2 if faulted else 0,
+            'host_motion_fault': 'LEFT_ENCODER_STALL' if faulted else '',
+            'host_motion_state': 'FAULT' if faulted else 'NORMAL',
+            'host_motion_reason': '',
+            'motors_enabled': not faulted,
+        },
+    )
+    return value
+
+
+def near_goal_command():
+    return {
+        'command_id': 'navigate:test-near-goal',
+        'target': {'frame_id': 'map', 'x': 0.0, 'y': 0.0, 'yaw': 0.0},
+    }
+
+
+def test_aborted_goal_is_accepted_inside_bounded_arrival_radius():
+    accepted, detail = WebBridgeNode.accept_aborted_goal_when_near(
+        near_goal_bridge(),
+        near_goal_command(),
+    )
+
+    assert accepted is True
+    assert '0.28 m from the goal' in detail
+
+
+def test_aborted_goal_is_not_accepted_outside_arrival_radius():
+    accepted, detail = WebBridgeNode.accept_aborted_goal_when_near(
+        near_goal_bridge(distance=0.36),
+        near_goal_command(),
+    )
+
+    assert accepted is False
+    assert 'outside the 0.35 m acceptance radius' in detail
+
+
+def test_aborted_goal_is_not_accepted_when_localization_is_lost():
+    accepted, detail = WebBridgeNode.accept_aborted_goal_when_near(
+        near_goal_bridge(localized=False),
+        near_goal_command(),
+    )
+
+    assert accepted is False
+    assert 'localization is not ready' in detail
+
+
+def test_aborted_goal_is_not_accepted_when_motor_fault_is_present():
+    accepted, detail = WebBridgeNode.accept_aborted_goal_when_near(
+        near_goal_bridge(faulted=True),
+        near_goal_command(),
+    )
+
+    assert accepted is False
+    assert detail == 'ESP32 diagnostics are unavailable or motors are disabled'
+
+
+def test_navigation_abort_near_goal_reports_success_without_escape_recovery():
+    sent = []
+    recovery_calls = []
+    cleared = []
+    value = SimpleNamespace(
+        command_lock=threading.Lock(),
+        recovery_cancelled_command_ids=set(),
+        pending_cancel_requests={},
+        accept_aborted_goal_when_near=lambda _command: (
+            True,
+            'Accepted arrival 0.28 m from the goal after Nav2 was blocked '
+            'near the destination',
+        ),
+        maybe_start_blocked_pose_recovery=lambda command, detail: (
+            recovery_calls.append((command, detail)) or True
+        ),
+        send_navigation_result=lambda command, status, detail: sent.append(
+            (command, status, detail)
+        ),
+        clear_active_command=cleared.append,
+        get_logger=lambda: SimpleNamespace(
+            error=lambda _message: None,
+            warning=lambda _message: None,
+            info=lambda _message: None,
+        ),
+    )
+    command = {
+        'command_id': 'navigate:test-near-goal',
+        'task_id': 'TASK-TEST',
+        'target': {'frame_id': 'map', 'x': 0.0, 'y': 0.0, 'yaw': 0.0},
+    }
+    future = ImmediateFuture(SimpleNamespace(
+        status=GoalStatus.STATUS_ABORTED,
+        result=SimpleNamespace(error_msg='Nav2 goal was aborted'),
+    ))
+
+    WebBridgeNode.navigation_result_callback(value, future, command)
+
+    assert sent == [(
+        command,
+        'succeeded',
+        'Accepted arrival 0.28 m from the goal after Nav2 was blocked '
+        'near the destination',
+    )]
+    assert recovery_calls == []
+    assert cleared == ['navigate:test-near-goal']

@@ -185,6 +185,75 @@ def test_mapping_runtime_preserves_start_failure_detail(tmp_path):
     )
 
 
+def test_mapping_runtime_uses_warm_lifecycle_callbacks(tmp_path, monkeypatch):
+    states = []
+    transitions = []
+    monkeypatch.setattr(
+        'amr_web_bridge.mapping_runtime.os.killpg', lambda *_args: None,
+    )
+
+    def lifecycle_state(node):
+        states.append(node)
+        return True
+
+    def lifecycle_command(manager, command):
+        transitions.append((manager, command))
+
+    runtime = MappingRuntime(
+        str(tmp_path),
+        run=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError('ROS CLI must not be used for lifecycle work')
+        ),
+        popen=lambda *_args, **_kwargs: FakeProcess(),
+        sleep=lambda _seconds: None,
+        lifecycle_state=lifecycle_state,
+        lifecycle_command=lifecycle_command,
+    )
+
+    runtime.start('mapping:robot01:warm-clients')
+    runtime.discard()
+
+    assert sorted(states) == ['amcl', 'planner_server']
+    assert set(transitions[:2]) == {
+        ('lifecycle_manager_navigation', 1),
+        ('lifecycle_manager_localization', 1),
+    }
+    assert transitions[2:] == [
+        ('lifecycle_manager_localization', 2),
+        ('lifecycle_manager_navigation', 2),
+    ]
+
+
+def test_mapping_start_rolls_back_a_partial_lifecycle_pause(tmp_path):
+    transitions = []
+
+    def lifecycle_command(manager, command):
+        transitions.append((manager, command))
+        if manager == 'lifecycle_manager_localization' and command == 1:
+            raise RuntimeError('localization pause failed')
+
+    runtime = MappingRuntime(
+        str(tmp_path),
+        lifecycle_state=lambda _node: True,
+        lifecycle_command=lifecycle_command,
+        sleep=lambda _seconds: None,
+    )
+
+    try:
+        runtime.start('mapping:robot01:partial-pause')
+    except RuntimeError as error:
+        assert str(error) == 'localization pause failed'
+    else:
+        raise AssertionError('partial lifecycle failure was not raised')
+
+    assert transitions == [
+        ('lifecycle_manager_navigation', 1),
+        ('lifecycle_manager_localization', 1),
+        ('lifecycle_manager_navigation', 2),
+    ]
+    assert runtime.snapshot(1)['phase'] == 'FAILED'
+
+
 def test_mapping_runtime_limits_lifecycle_discovery_and_reports_timeout(tmp_path):
     def run(_arguments, **_kwargs):
         raise subprocess.TimeoutExpired('ros2 lifecycle get /amcl', 12.0)
