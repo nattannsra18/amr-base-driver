@@ -103,7 +103,9 @@ def test_preview_goal_uses_compute_path_and_never_navigate_to_pose():
 
 def test_recovery_reuses_native_compute_path_action_client():
     source = inspect.getsource(WebBridgeNode.compute_recovery_path)
+    init_source = inspect.getsource(WebBridgeNode.__init__)
     assert 'recovery_plan_client.send_goal_async' in source
+    assert 'self.recovery_plan_client = self.preview_client' in init_source
     assert 'subprocess' not in source
     assert "['ros2'" not in source
 

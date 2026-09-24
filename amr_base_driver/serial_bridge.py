@@ -51,6 +51,7 @@ class SerialBridge(Node):
         self.declare_parameter('accel_scale', 0.9372)
         self.declare_parameter('max_rpm', 90.0)
         self.declare_parameter('cmd_vel_timeout', 0.25)
+        self.declare_parameter('telemetry_publish_divisor', 2)
         self.declare_parameter('enable_motors', False)
         self.declare_parameter('odom_frame', 'odom')
         self.declare_parameter('base_frame', 'base_footprint')
@@ -65,6 +66,10 @@ class SerialBridge(Node):
         self.accel_scale = float(self.get_parameter('accel_scale').value)
         self.max_rpm = float(self.get_parameter('max_rpm').value)
         self.cmd_timeout = float(self.get_parameter('cmd_vel_timeout').value)
+        self.telemetry_publish_divisor = max(
+            1,
+            int(self.get_parameter('telemetry_publish_divisor').value),
+        )
         self.motors_enabled = bool(self.get_parameter('enable_motors').value)
         self.odom_frame = self.get_parameter('odom_frame').value
         self.base_frame = self.get_parameter('base_frame').value
@@ -347,7 +352,6 @@ class SerialBridge(Node):
         self.mcu_flags = values[16]
         self.mcu_fault = values[17]
 
-        stamp = self.get_clock().now().to_msg()
         self.last_telemetry_monotonic = time.monotonic()
         previous_fault = self.motion_guard.fault
         previous_pre_stall = self.motion_guard.pre_stall
@@ -362,6 +366,9 @@ class SerialBridge(Node):
                 'Motors paused before fault latch: '
                 f'{self.motion_guard.pre_stall}; waiting for one recovery attempt')
         self.telemetry_count += 1
+        if self.telemetry_count % self.telemetry_publish_divisor:
+            return
+        stamp = self.get_clock().now().to_msg()
         self.publish_imu(stamp, accel, gyro)
         self.publish_joint_state(stamp, left_count, right_count,
                                  left_rpm, right_rpm)

@@ -55,6 +55,22 @@ def test_failed_escape_latches_original_reason():
     assert guard.fault == 'LEFT_NO_WHEEL_FEEDBACK'
 
 
+def test_failed_escape_preserves_a_fresh_opposite_wheel_fault():
+    guard = MotionGuard()
+    guard.command(0.0, [15.0, 15.0])
+    guard.sample(0.86, [0.0, 15.0])
+    guard.sample(1.32, [0.0, 15.0])
+    assert guard.begin_recovery(1.33)
+
+    # The authorized maneuver changes direction and the other wheel now
+    # loses feedback.  This is the real failure that diagnostics must retain.
+    guard.command(1.40, [-15.0, -15.0])
+    guard.sample(2.26, [-15.0, 0.0])
+    assert guard.sample(2.72, [-15.0, 0.0]) == 'RIGHT_NO_WHEEL_FEEDBACK'
+    assert guard.finish_recovery(False)
+    assert guard.fault == 'RIGHT_NO_WHEEL_FEEDBACK'
+
+
 def test_recovery_orchestrator_failure_can_latch_pre_stall_directly():
     guard = MotionGuard()
     guard.command(0.0, [15.0, 15.0])

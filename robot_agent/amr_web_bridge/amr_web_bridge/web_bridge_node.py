@@ -67,7 +67,12 @@ from .path_utils import (
 )
 from .profile_validator import validate_robot_profile
 from .recovery_services import call_empty_service, call_service
-from .stall_escape import choose_stall_escape, StallEscapeDecision
+from .stall_escape import (
+    choose_stall_arcs,
+    choose_stall_escape,
+    choose_stall_turns,
+    StallEscapeDecision,
+)
 
 
 class WebBridgeNode(Node):
@@ -451,7 +456,16 @@ class WebBridgeNode(Node):
         self.robot_operation_active = False
         self.automatic_stall_recovery_lock = threading.Lock()
         self.automatic_stall_recovery_active = False
-        self.automatic_stall_recovery_attempted_ids: set[str] = set()
+        self.automatic_stall_recovery_attempt_counts: dict[str, int] = {}
+        # A command may meet more than one *independent* obstruction while it
+        # is travelling.  Track a fault episode separately from the bounded
+        # command budget so a repeated diagnostic sample cannot consume the
+        # budget, while a later PRE_STALL after verified healthy motion can be
+        # recovered instead of being left for Nav2 to abort.
+        self.automatic_stall_fault_active = False
+        self.automatic_stall_fault_epoch = 0
+        self.automatic_stall_recovery_last_epochs: dict[str, int] = {}
+        self.automatic_stall_recovery_max_episodes = 3
         self.blocked_start_recovery_lock = threading.Lock()
         self.blocked_start_recovery_active = False
         self.blocked_start_recovery_attempted_ids: set[str] = set()
@@ -595,14 +609,9 @@ class WebBridgeNode(Node):
             ComputePathToPose,
             self.compute_path_action,
         )
-        # Recovery runs from a worker thread after Nav2 aborts a goal. Keep a
-        # warm action client in this node's DDS participant so recovery never
-        # launches a fresh ``ros2 action send_goal`` process under load.
-        self.recovery_plan_client = ActionClient(
-            self,
-            ComputePathToPose,
-            self.compute_path_action,
-        )
+        # One warm client can safely own multiple goals and avoids five extra
+        # action waitables on every executor wakeup.
+        self.recovery_plan_client = self.preview_client
         self.recovery_spin_client = ActionClient(self, Spin, '/spin')
         self.load_map_client = self.create_client(
             LoadMap,
@@ -666,26 +675,10 @@ class WebBridgeNode(Node):
             Trigger,
             '/guarded_reverse_escape',
         )
-        self.command_timer = self.create_timer(
-            0.1,
-            self.process_command_queue,
-        )
-        self.preview_timer = self.create_timer(
-            0.1,
-            self.process_preview_queue,
-        )
-        self.map_command_timer = self.create_timer(
-            0.1,
-            self.process_map_command_queue,
-        )
-        self.localization_command_timer = self.create_timer(
-            0.1,
-            self.process_localization_command_queue,
-        )
-        self.amcl_state_timer = self.create_timer(
-            1.0,
-            self.poll_amcl_state,
-        )
+        self.guarded_arc_clients = {
+            1: self.create_client(Trigger, '/guarded_arc_escape_left'),
+            -1: self.create_client(Trigger, '/guarded_arc_escape_right'),
+        }
         self.emergency_velocity_publisher = self.create_publisher(
             Twist,
             self.emergency_stop_cmd_vel_topic,
@@ -696,29 +689,22 @@ class WebBridgeNode(Node):
             self.initial_pose_topic,
             10,
         )
-        self.emergency_zero_timer = self.create_timer(
-            1.0 / self.emergency_stop_zero_rate,
-            self.publish_emergency_zero,
-        )
-        self.physical_estop_watchdog_timer = self.create_timer(
-            0.2,
-            self.enforce_physical_estop_watchdog,
-        )
-        self.mapping_deadman_timer = self.create_timer(
+        self.periodic_intervals = {
+            'work': 0.1,
+            'amcl': 1.0,
+            'emergency_zero': 1.0 / self.emergency_stop_zero_rate,
+            'physical_estop': 0.2,
+            'mapping_deadman': 0.05,
+            'mapping_pose': 0.2,
+        }
+        periodic_start = time.monotonic()
+        self.periodic_deadlines = {
+            name: periodic_start + interval
+            for name, interval in self.periodic_intervals.items()
+        }
+        self.periodic_timer = self.create_timer(
             0.05,
-            self.enforce_mapping_deadman,
-        )
-        self.localization_scan_timer = self.create_timer(
-            0.1,
-            self.run_localization_scan,
-        )
-        self.mapping_pose_timer = self.create_timer(
-            0.2,
-            self.update_mapping_pose,
-        )
-        self.automatic_stall_recovery_timer = self.create_timer(
-            0.10,
-            self.maybe_start_automatic_stall_recovery,
+            self.process_periodic_work,
         )
 
         self.worker_thread = threading.Thread(
@@ -762,6 +748,36 @@ class WebBridgeNode(Node):
         self.get_logger().info(
             f'Nav2 global path topic: {self.path_topic}'
         )
+
+    def process_periodic_work(self) -> None:
+        """Run periodic work at its original cadence from one ROS timer."""
+        now = time.monotonic()
+
+        def due(name: str) -> bool:
+            if now < self.periodic_deadlines[name]:
+                return False
+            self.periodic_deadlines[name] = (
+                now + self.periodic_intervals[name]
+            )
+            return True
+
+        if due('mapping_deadman'):
+            self.enforce_mapping_deadman()
+        if due('work'):
+            self.process_command_queue()
+            self.process_preview_queue()
+            self.process_map_command_queue()
+            self.process_localization_command_queue()
+            self.run_localization_scan()
+            self.maybe_start_automatic_stall_recovery()
+        if due('emergency_zero'):
+            self.publish_emergency_zero()
+        if due('physical_estop'):
+            self.enforce_physical_estop_watchdog()
+        if due('mapping_pose'):
+            self.update_mapping_pose()
+        if due('amcl'):
+            self.poll_amcl_state()
 
     @staticmethod
     def utc_timestamp() -> str:
@@ -3251,11 +3267,38 @@ class WebBridgeNode(Node):
         )
 
     def maybe_start_automatic_stall_recovery(self) -> None:
-        """Start one bounded escape attempt for an active navigation goal."""
+        """Start one bounded recovery sequence for each new stall episode."""
         if self.motion_stop_latched():
             return
         fault = self.motor_fault_snapshot()
-        if fault is None or not self.resettable_wheel_fault(fault):
+        resettable = fault is not None and self.resettable_wheel_fault(fault)
+        with self.automatic_stall_recovery_lock:
+            if not resettable:
+                # Re-arm only after the base watchdog itself reports NORMAL.
+                # RECOVERING, VERIFYING_RECOVERY, missing diagnostics, or an
+                # unrelated fault must not make one physical obstruction look
+                # like a new episode.
+                if fault is not None:
+                    mcu_fault = int(fault.get('mcu_fault', -1))
+                    host_fault = str(
+                        fault.get('host_motion_fault', '')
+                    ).strip()
+                    host_state = str(
+                        fault.get('host_motion_state', '')
+                    ).strip().upper()
+                    if (
+                        mcu_fault == 0
+                        and not host_fault
+                        and host_state in {'', 'NORMAL'}
+                    ):
+                        self.automatic_stall_fault_active = False
+                return
+            if not self.automatic_stall_fault_active:
+                self.automatic_stall_fault_epoch += 1
+                self.automatic_stall_fault_active = True
+            fault_epoch = self.automatic_stall_fault_epoch
+
+        if fault is None:
             return
         with self.command_lock:
             active = dict(self.active_command) if self.active_command else None
@@ -3265,35 +3308,61 @@ class WebBridgeNode(Node):
         if not command_id:
             return
         with self.automatic_stall_recovery_lock:
+            attempts = self.automatic_stall_recovery_attempt_counts.get(
+                command_id,
+                0,
+            )
             if (
                 self.automatic_stall_recovery_active
-                or command_id in self.automatic_stall_recovery_attempted_ids
+                or attempts >= self.automatic_stall_recovery_max_episodes
+                or self.automatic_stall_recovery_last_epochs.get(command_id)
+                == fault_epoch
             ):
                 return
             with self.robot_operation_lock:
                 if self.robot_operation_active:
                     return
                 self.robot_operation_active = True
-            if len(self.automatic_stall_recovery_attempted_ids) >= 512:
-                self.automatic_stall_recovery_attempted_ids.clear()
+            if len(self.automatic_stall_recovery_attempt_counts) >= 512:
+                self.automatic_stall_recovery_attempt_counts.clear()
+                self.automatic_stall_recovery_last_epochs.clear()
             self.automatic_stall_recovery_active = True
-            self.automatic_stall_recovery_attempted_ids.add(command_id)
+            episode = attempts + 1
+            self.automatic_stall_recovery_attempt_counts[command_id] = episode
+            self.automatic_stall_recovery_last_epochs[command_id] = fault_epoch
         threading.Thread(
             target=self.run_automatic_stall_recovery,
-            args=(command_id,),
+            args=(command_id, episode),
             name=f'automatic-stall-recovery-{command_id}',
             daemon=True,
         ).start()
 
-    def run_automatic_stall_recovery(self, command_id: str) -> None:
+    def run_automatic_stall_recovery(
+        self,
+        command_id: str,
+        episode: int,
+    ) -> None:
+        episode_label = (
+            f'episode {episode}/{self.automatic_stall_recovery_max_episodes}'
+        )
         try:
-            succeeded, detail = self.reset_motor_stall()
-            log = self.get_logger().warning if succeeded else self.get_logger().error
-            log(f'Automatic wheel-stall recovery for {command_id}: {detail}')
+            succeeded, detail = self.reset_motor_stall(
+                recovery_episode=episode,
+            )
+            if succeeded:
+                self.get_logger().warning(
+                    'Automatic wheel-stall recovery '
+                    f'{episode_label} for {command_id}: {detail}'
+                )
+            else:
+                self.get_logger().error(
+                    'Automatic wheel-stall recovery '
+                    f'{episode_label} for {command_id}: {detail}'
+                )
         except Exception as error:
             self.get_logger().error(
-                f'Automatic wheel-stall recovery for {command_id} failed: '
-                f'{error}'
+                'Automatic wheel-stall recovery '
+                f'{episode_label} for {command_id} failed: {error}'
             )
         finally:
             with self.automatic_stall_recovery_lock:
@@ -3339,6 +3408,53 @@ class WebBridgeNode(Node):
             range_max=float(scan['range_max']),
             rear_required=(math.inf if prefer_turn else 0.45),
         )
+
+    def stall_turn_decisions(self) -> tuple[StallEscapeDecision, ...]:
+        """Return both scan-safe turn directions, clearest direction first."""
+        now = time.monotonic()
+        with self.scan_lock:
+            scan = dict(self.latest_scan) if self.latest_scan else None
+            last_scan = self.last_scan_monotonic
+        if scan is None or last_scan is None or now - last_scan > 1.0:
+            return ()
+        return choose_stall_turns(
+            scan['ranges'],
+            angle_min=float(scan['angle_min']),
+            angle_increment=float(scan['angle_increment']),
+            range_min=float(scan['range_min']),
+            range_max=float(scan['range_max']),
+        )
+
+    def stall_arc_decisions(self) -> tuple[StallEscapeDecision, ...]:
+        """Return scan-safe rolling arcs, clearest direction first."""
+        now = time.monotonic()
+        with self.scan_lock:
+            scan = dict(self.latest_scan) if self.latest_scan else None
+            last_scan = self.last_scan_monotonic
+        if scan is None or last_scan is None or now - last_scan > 1.0:
+            return ()
+        return choose_stall_arcs(
+            scan['ranges'],
+            angle_min=float(scan['angle_min']),
+            angle_increment=float(scan['angle_increment']),
+            range_min=float(scan['range_min']),
+            range_max=float(scan['range_max']),
+        )
+
+    def stall_escape_for_recovery_episode(
+        self,
+        episode: int,
+    ) -> StallEscapeDecision:
+        """Change safe maneuver after a later, independent obstruction."""
+        if episode <= 1:
+            return self.stall_escape_decision()
+        arcs = self.stall_arc_decisions()
+        if arcs:
+            # Episode two uses the clearest rolling arc.  Episode three uses
+            # the other safe direction when available instead of repeating a
+            # maneuver which already led back into an obstruction.
+            return arcs[min(episode - 2, len(arcs) - 1)]
+        return self.stall_escape_decision()
 
     @staticmethod
     def _service_response(
@@ -3392,7 +3508,11 @@ class WebBridgeNode(Node):
         request.data = bool(success)
         return self._service_response(client, request)
 
-    def reset_motor_stall(self) -> tuple[bool, str]:
+    def reset_motor_stall(
+        self,
+        *,
+        recovery_episode: int = 1,
+    ) -> tuple[bool, str]:
         initial_fault = self.motor_fault_snapshot()
         if initial_fault is None:
             return False, 'ESP32 diagnostics are unavailable; motor stall reset was refused'
@@ -3424,7 +3544,7 @@ class WebBridgeNode(Node):
 
         active = self.cancel_active_navigation_for_operation(resume=True)
         escape = (
-            self.stall_escape_decision()
+            self.stall_escape_for_recovery_episode(recovery_episode)
             if active is not None
             else None
         )
@@ -3448,7 +3568,7 @@ class WebBridgeNode(Node):
                 self.send_navigation_result(active, 'aborted', detail)
             return False, detail
 
-        pre_stall_recovery_pending = host_state == 'PRE_STALL'
+        pre_stall_recovery_pending = host_state.strip().upper() == 'PRE_STALL'
 
         def finish_pre_stall(success: bool) -> tuple[bool, str]:
             nonlocal pre_stall_recovery_pending
@@ -3459,6 +3579,94 @@ class WebBridgeNode(Node):
                 pre_stall_recovery_pending = False
             return finished, finish_output
 
+        def motor_state(
+            snapshot: dict[str, Any] | None,
+        ) -> tuple[str, str]:
+            if snapshot is None:
+                return 'terminal', 'ESP32 diagnostics became unavailable'
+            mcu = int(snapshot.get('mcu_fault', -1))
+            host = str(snapshot.get('host_motion_fault', '')).strip()
+            state = str(snapshot.get('host_motion_state', '')).strip().upper()
+            reason = str(snapshot.get('host_motion_reason', '')).strip()
+            if mcu != 0 or host or state == 'FAULTED':
+                return 'terminal', (
+                    'motor fault is active '
+                    f'(mcu_fault={mcu}, host_fault={host or reason or "none"}, '
+                    f'host_state={state or "unknown"})'
+                )
+            if state == 'PRE_STALL':
+                return 'pre_stall', reason or 'wheel feedback stopped'
+            return 'clear', state or 'NORMAL'
+
+        def verify_completed_recovery() -> tuple[bool, str]:
+            """Finish an authorized maneuver and verify the resulting state."""
+            finished, finish_output = finish_pre_stall(True)
+            if not finished:
+                return False, (
+                    'base driver rejected recovery completion: '
+                    f'{finish_output or "no response"}'
+                )
+            time.sleep(0.10)
+            verified = self.motor_fault_snapshot()
+            status, state_detail = motor_state(verified)
+            verified_state = str(
+                (verified or {}).get('host_motion_state', '')
+            ).strip().upper()
+            if status != 'clear' or verified_state not in {
+                '', 'NORMAL', 'VERIFYING_RECOVERY',
+            }:
+                return False, (
+                    'base driver did not confirm a healthy recovery state: '
+                    f'{state_detail}'
+                )
+            return True, finish_output
+
+        if active is None and pre_stall_recovery_pending:
+            # A PRE_STALL may only be cleared by one observed, guarded escape.
+            # If the originating navigation goal is already gone, there is no
+            # target to resume and no reason to move the chassis automatically.
+            # Latch the evidence instead of reporting a recovery which never
+            # physically exercised the affected wheel.
+            finished, finish_output = finish_pre_stall(False)
+            if not finished:
+                return False, (
+                    'No navigation goal was active and the base driver could '
+                    'not latch the pending wheel fault: '
+                    f'{finish_output or "no response"}'
+                )
+            return False, (
+                'No navigation goal was active; the pending wheel fault was '
+                'latched without moving the robot'
+            )
+
+        def perform_escape(
+            decision: StallEscapeDecision,
+        ) -> tuple[bool, str, str]:
+            if decision.action == 'back_up':
+                succeeded, maneuver_output = self.guarded_reverse_for_recovery()
+                return succeeded, maneuver_output, 'short reverse'
+            if decision.action == 'arc':
+                succeeded, maneuver_output = self.guarded_arc_for_recovery(
+                    decision.value
+                )
+                direction = 'left' if decision.value > 0.0 else 'right'
+                return (
+                    succeeded,
+                    maneuver_output,
+                    f'guarded rolling {direction} arc',
+                )
+            succeeded, maneuver_output = self.spin_for_recovery(decision.value)
+            direction = 'left' if decision.value > 0.0 else 'right'
+            return succeeded, maneuver_output, f'short {direction} turn'
+
+        def refused_before_motion(output: str) -> bool:
+            """Return true only for a guard rejection before velocity publish."""
+            normalized = str(output or '').strip().lower()
+            return (
+                normalized.startswith('guarded ')
+                and ' refused:' in normalized
+            )
+
         deadline = time.monotonic() + 2.5
         latest = fault
         try:
@@ -3468,6 +3676,9 @@ class WebBridgeNode(Node):
                 if (
                     int(latest['mcu_fault']) == 0
                     and not str(latest['host_motion_fault'])
+                    and str(
+                        latest.get('host_motion_state', '')
+                    ).strip().upper() not in {'PRE_STALL', 'FAULTED'}
                 ):
                     if active is not None:
                         if escape is None:
@@ -3477,65 +3688,212 @@ class WebBridgeNode(Node):
                             )
                             self.send_navigation_result(active, 'aborted', detail)
                             return False, detail
-                        if escape.action == 'back_up':
-                            escaped, escape_output = (
-                                self.navigation_recovery_runner.back_up(escape.value)
+                        candidates = [escape]
+                        attempted = {
+                            (str(escape.action), round(float(escape.value), 3))
+                        }
+                        # Do not auto-pivot this passive-caster chassis. The
+                        # second and final option is another scan/odom-guarded
+                        # rolling arc, which keeps one wheel above stiction.
+                        alternatives = self.stall_arc_decisions()
+                        for alternative in alternatives:
+                            key = (
+                                str(alternative.action),
+                                round(float(alternative.value), 3),
                             )
-                            maneuver = 'short reverse'
-                            # A caught wheel can make straight reverse time out.
-                            # Re-read the live scan and try exactly one
-                            # collision-checked turn toward the clearer side.
-                            if not escaped:
-                                turn = self.stall_escape_decision(prefer_turn=True)
-                                if turn.action == 'spin':
-                                    turned, turn_output = (
-                                        self.navigation_recovery_runner.spin(
-                                            turn.value
-                                        )
+                            if key in attempted:
+                                continue
+                            candidates.append(alternative)
+                            attempted.add(key)
+                            if len(candidates) >= 2:
+                                break
+
+                        escape_attempts: list[str] = []
+                        escaped = False
+                        maneuver = 'bounded escape'
+                        try:
+                            for index, candidate in enumerate(candidates[:2]):
+                                action_ok, action_output, action_name = (
+                                    perform_escape(candidate)
+                                )
+                                escape_attempts.append(
+                                    f'{action_name}: '
+                                    f'{action_output or "no response"}'
+                                )
+                                post_action = self.motor_fault_snapshot()
+                                post_status, post_detail = motor_state(post_action)
+
+                                if post_status == 'terminal':
+                                    finish_pre_stall(False)
+                                    detail = (
+                                        f'{action_name.capitalize()} stopped with '
+                                        f'{post_detail}; no further maneuver was '
+                                        'attempted'
                                     )
-                                    escape_output = '\n'.join(filter(None, (
-                                        escape_output,
-                                        turn_output,
-                                    )))
-                                    if turned:
-                                        escaped = True
-                                        escape = turn
-                                        maneuver = (
-                                            'short left turn'
-                                            if turn.value > 0.0
-                                            else 'short right turn'
+                                    self.send_navigation_result(
+                                        active, 'aborted', detail,
+                                    )
+                                    return False, detail
+
+                                if post_status == 'pre_stall':
+                                    if pre_stall_recovery_pending:
+                                        finish_pre_stall(False)
+                                        detail = (
+                                            f'{action_name.capitalize()} lost wheel '
+                                            'feedback during the one authorized '
+                                            f'recovery attempt ({post_detail})'
                                         )
-                        else:
-                            escaped, escape_output = (
-                                self.navigation_recovery_runner.spin(escape.value)
-                            )
-                            maneuver = (
-                                'short left turn'
-                                if escape.value > 0.0
-                                else 'short right turn'
-                            )
+                                        self.send_navigation_result(
+                                            active, 'aborted', detail,
+                                        )
+                                        return False, detail
+                                    if index + 1 >= min(2, len(candidates)):
+                                        # No maneuver budget remains. Latch the
+                                        # observed pre-stall rather than leaving
+                                        # the base in an ambiguous stopped state.
+                                        self.finish_motor_recovery_for_recovery(False)
+                                        detail = (
+                                            f'{action_name.capitalize()} caused a '
+                                            f'new pre-stall ({post_detail}); no '
+                                            'bounded alternative remained'
+                                        )
+                                        self.send_navigation_result(
+                                            active, 'aborted', detail,
+                                        )
+                                        return False, detail
+                                    begun, begin_output = (
+                                        self.clear_motor_fault_for_recovery()
+                                    )
+                                    if not begun:
+                                        self.finish_motor_recovery_for_recovery(False)
+                                        detail = (
+                                            'A new pre-stall was detected, but the '
+                                            'base driver refused the one recovery '
+                                            f'window: {begin_output or "no response"}'
+                                        )
+                                        self.send_navigation_result(
+                                            active, 'aborted', detail,
+                                        )
+                                        return False, detail
+                                    pre_stall_recovery_pending = True
+                                    continue
+
+                                if not action_ok:
+                                    if pre_stall_recovery_pending:
+                                        # A guarded service refusal happens before
+                                        # it publishes any velocity. Keep the same
+                                        # one-shot recovery authorization and try
+                                        # the remaining scan-safe candidate. A
+                                        # timeout or interrupted motion is not safe
+                                        # to reinterpret this way because the
+                                        # chassis may already have moved.
+                                        if (
+                                            refused_before_motion(action_output)
+                                            and index + 1
+                                            < min(2, len(candidates))
+                                        ):
+                                            continue
+                                        finish_pre_stall(False)
+                                        detail = (
+                                            f'{action_name.capitalize()} failed '
+                                            'during the one authorized recovery '
+                                            f'attempt: {action_output or "no response"}'
+                                        )
+                                        self.send_navigation_result(
+                                            active, 'aborted', detail,
+                                        )
+                                        return False, detail
+                                    continue
+
+                                if pre_stall_recovery_pending:
+                                    verified, verify_detail = (
+                                        verify_completed_recovery()
+                                    )
+                                    if not verified:
+                                        detail = (
+                                            f'{action_name.capitalize()} completed, '
+                                            'but wheel recovery verification failed: '
+                                            f'{verify_detail}'
+                                        )
+                                        self.send_navigation_result(
+                                            active, 'aborted', detail,
+                                        )
+                                        return False, detail
+
+                                escaped = True
+                                escape = candidate
+                                maneuver = action_name
+                                break
+                        finally:
+                            # Any exception after begin_recovery() must latch
+                            # the pending wheel fault instead of silently
+                            # leaving motion blocked in RECOVERING.
+                            if pre_stall_recovery_pending:
+                                finish_pre_stall(False)
+
                         if not escaped:
                             detail = (
-                                'Motor stall cleared, but Nav2 refused every '
-                                'collision-checked escape; the current goal was '
-                                f'not resumed: {escape_output or "no response"}'
+                                'Motor stall cleared, but both bounded escape '
+                                'maneuvers were refused or timed out; the current '
+                                f'goal was not resumed: {"; ".join(escape_attempts)}'
                             )
                             self.send_navigation_result(active, 'aborted', detail)
                             return False, detail
-                        finished, finish_output = finish_pre_stall(True)
-                        if not finished:
+
+                        lifecycle_ok, lifecycle_detail = (
+                            self.wait_for_recovery_lifecycle()
+                        )
+                        if not lifecycle_ok:
                             detail = (
-                                'Nav2 completed the escape, but the base driver '
-                                'could not verify the recovery state: '
-                                f'{finish_output or "no response"}'
+                                'Motor escape completed, but Nav2 did not return '
+                                f'to an active state: {lifecycle_detail}'
                             )
                             self.send_navigation_result(active, 'aborted', detail)
                             return False, detail
+
+                        cleared, clear_output = self.clear_recovery_costmaps()
+                        if not cleared:
+                            detail = (
+                                'Motor escape completed, but costmaps could not '
+                                f'be cleared: {clear_output or "no response"}'
+                            )
+                            self.send_navigation_result(active, 'aborted', detail)
+                            return False, detail
+
+                        planned, plan_output = self.compute_recovery_path(
+                            active['target']
+                        )
+                        if not planned and 'request was rejected' in plan_output.lower():
+                            lifecycle_ok, lifecycle_detail = (
+                                self.wait_for_recovery_lifecycle()
+                            )
+                            if lifecycle_ok:
+                                cleared, clear_output = self.clear_recovery_costmaps()
+                                if cleared:
+                                    planned, plan_output = self.compute_recovery_path(
+                                        active['target']
+                                    )
+                            else:
+                                plan_output = (
+                                    f'{plan_output}; Nav2 lifecycle did not recover: '
+                                    f'{lifecycle_detail}'
+                                )
+                        if not planned:
+                            failure = classify_plan_failure(plan_output)
+                            detail = (
+                                'Motor stall cleared, but no connected route was '
+                                f'available after bounded escape: {failure}: '
+                                f'{plan_output or "planner returned no path"}'
+                            )
+                            self.send_navigation_result(active, 'aborted', detail)
+                            return False, detail
+
                         self.command_queue.put(active)
                         return True, (
                             'Motor stall reset confirmed by ESP32 diagnostics; '
                             f'Nav2 completed a {maneuver} ({escape.detail}); '
-                            'motors remain enabled and the current goal was resumed'
+                            'costmaps were cleared, a connected route was verified, '
+                            'and the current goal was resumed'
                         )
                     finished, finish_output = finish_pre_stall(True)
                     if not finished:
@@ -3638,6 +3996,156 @@ class WebBridgeNode(Node):
             Trigger.Request(),
             timeout_seconds=6.0,
         )
+
+    def guarded_arc_for_recovery(self, yaw: float) -> tuple[bool, str]:
+        """Run a scan/odometry-guarded rolling arc outside Nav2 planning."""
+        direction = 1 if float(yaw) > 0.0 else -1
+        clients = getattr(self, 'guarded_arc_clients', {})
+        client = clients.get(direction)
+        if client is None:
+            return self.navigation_recovery_runner.guarded_arc(yaw)
+        return WebBridgeNode._service_response(
+            client,
+            Trigger.Request(),
+            timeout_seconds=6.0,
+        )
+
+    def recovery_motion_is_safe(self) -> tuple[bool, str]:
+        """Revalidate hard safety gates before each additional maneuver."""
+        if self.motion_stop_latched():
+            return False, 'an emergency stop is latched'
+        fault = self.motor_fault_snapshot()
+        if fault is None or not fault.get('motors_enabled'):
+            return False, 'ESP32 diagnostics are unavailable or motors are disabled'
+        if (
+            int(fault.get('mcu_fault', -1)) != 0
+            or str(fault.get('host_motion_fault', '')).strip()
+            or str(fault.get('host_motion_state', '')).strip().upper()
+            not in {'', 'NORMAL'}
+        ):
+            return False, 'motor diagnostics are not normal'
+        localization = self.localization_snapshot()
+        if (
+            localization.get('health') != 'LOCALIZED'
+            or localization.get('amcl_state') != 'ACTIVE'
+            or not localization.get('tf_available')
+        ):
+            return False, (
+                'localization is not ready '
+                f'({localization.get("detail") or localization.get("health")})'
+            )
+        return True, 'recovery motion safety checks passed'
+
+    def wait_for_recovery_motion_safe(
+        self,
+        timeout_seconds: float = 4.0,
+        poll_seconds: float = 0.10,
+    ) -> tuple[bool, str]:
+        """Let odometry and AMCL settle after a bounded recovery motion."""
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        detail = 'recovery motion safety state is unavailable'
+        while time.monotonic() < deadline:
+            safe, detail = self.recovery_motion_is_safe()
+            if safe:
+                return True, detail
+            # E-stop and motor diagnostics are hard gates. Only localization
+            # freshness is allowed to converge after a completed maneuver.
+            if not detail.startswith('localization is not ready'):
+                return False, detail
+            time.sleep(max(0.0, float(poll_seconds)))
+        return False, f'{detail}; did not recover within {timeout_seconds:.1f}s'
+
+    def run_alternative_escape_maneuvers(
+        self,
+        command_id: str,
+        *,
+        attempted_turn_values: set[float] | None = None,
+    ) -> tuple[bool, str]:
+        """Try a bounded reverse-arc sequence before replanning once."""
+        attempts: list[str] = []
+        tried_values = set(attempted_turn_values or ())
+        arc_options = tuple(
+            option
+            for option in self.stall_arc_decisions()
+            if float(option.value) not in tried_values
+        )
+        if arc_options:
+            preferred = arc_options[0]
+            tried_values.add(float(preferred.value))
+            safe, safety_detail = self.wait_for_recovery_motion_safe()
+            if not safe:
+                return False, safety_detail
+            turned, output = self.guarded_arc_for_recovery(preferred.value)
+            attempts.append(
+                f'preferred rolling arc ({preferred.detail}): '
+                f'{output or "no response"}'
+            )
+            if turned:
+                return True, '; '.join(attempts)
+
+        # A footprint-safe spin can still be impossible while a chassis corner
+        # is close to furniture. Move the center of rotation another 0.10 m
+        # rearward, but only when a fresh scan independently authorizes it.
+        reverse = self.stall_escape_decision()
+        reversed_again = False
+        if reverse.action == 'back_up':
+            safe, safety_detail = self.wait_for_recovery_motion_safe()
+            if not safe:
+                return False, safety_detail
+            reversed_again, output = self.guarded_reverse_for_recovery()
+            attempts.append(
+                f'additional guarded reverse ({reverse.detail}): '
+                f'{output or "no response"}'
+            )
+            if reversed_again:
+                lifecycle_ok, lifecycle_detail = self.wait_for_recovery_lifecycle()
+                if not lifecycle_ok:
+                    return False, lifecycle_detail
+                # The center of rotation moved, so a direction rejected at
+                # the old pose is a genuinely new collision-checked attempt.
+                tried_values.clear()
+
+        # Re-read LaserScan after the center of rotation changes. Try the
+        # clearest rolling direction, then the other scan-safe direction.
+        fresh_options = self.stall_arc_decisions()
+        for option in fresh_options[:2]:
+            value = float(option.value)
+            if value in tried_values:
+                continue
+            tried_values.add(value)
+            safe, safety_detail = self.wait_for_recovery_motion_safe()
+            if not safe:
+                return False, safety_detail
+            turned, output = self.guarded_arc_for_recovery(value)
+            direction = 'left' if value > 0.0 else 'right'
+            attempts.append(
+                f'{direction} rolling arc ({option.detail}): '
+                f'{output or "no response"}'
+            )
+            if turned:
+                return True, '; '.join(attempts)
+
+        if not attempts:
+            attempts.append('no fresh scan-safe turn or additional reverse was available')
+        self.get_logger().warning(
+            f'Alternative escape maneuvers for {command_id} ended without a '
+            f'completed turn: {"; ".join(attempts)}'
+        )
+        # The first guarded reverse may have changed the pose enough to plan a
+        # route, but only continue if the last failed maneuver did not leave
+        # the base in PRE_STALL/FAULTED. Previously this returned success
+        # unconditionally and could requeue a Nav2 goal while motion was
+        # inhibited by the base driver.
+        safe, safety_detail = self.wait_for_recovery_motion_safe()
+        if not safe:
+            return False, (
+                f'{"; ".join(attempts)}; recovery stopped because '
+                f'{safety_detail}'
+            )
+        attempts.append(
+            'no turn completed; continuing from the verified-safe reverse pose'
+        )
+        return True, '; '.join(attempts)
 
     def spin_for_recovery(
         self,
@@ -3770,7 +4278,7 @@ class WebBridgeNode(Node):
         command: dict[str, Any],
         original_detail: str,
     ) -> bool:
-        """Try one scan-guarded reverse after an early collision-like abort."""
+        """Try one scan-guarded reverse or rolling arc after an early abort."""
         command_id = str(command.get('command_id', 'unknown'))
 
         def refuse(reason: str) -> bool:
@@ -3790,8 +4298,8 @@ class WebBridgeNode(Node):
                 f'{self.blocked_start_recovery_window_seconds:.1f}s window'
             )
         escape = self.stall_escape_decision()
-        if escape.action != 'back_up':
-            return refuse(f'LaserScan did not authorize reverse: {escape.detail}')
+        if escape.action not in {'back_up', 'arc', 'spin'}:
+            return refuse(f'LaserScan found no safe escape: {escape.detail}')
         fault = self.motor_fault_snapshot()
         if fault is None or not fault.get('motors_enabled'):
             return refuse('ESP32 diagnostics are unavailable or motors are disabled')
@@ -3839,7 +4347,13 @@ class WebBridgeNode(Node):
         self.clear_active_command(command_id)
         threading.Thread(
             target=self.run_blocked_pose_recovery,
-            args=(dict(command), original_detail, escape.detail),
+            args=(
+                dict(command),
+                original_detail,
+                escape.action,
+                float(escape.value),
+                escape.detail,
+            ),
             name=f'blocked-pose-recovery-{command_id}',
             daemon=True,
         ).start()
@@ -3913,19 +4427,43 @@ class WebBridgeNode(Node):
         self,
         command: dict[str, Any],
         original_detail: str,
+        escape_action: str,
+        escape_value: float,
         scan_detail: str,
     ) -> None:
         command_id = str(command.get('command_id', ''))
         try:
-            self.send_command_status(
-                command,
-                'started',
-                'Nav2 reported a blocked start; checking a guarded reverse escape',
-            )
-            escaped, escape_output = self.guarded_reverse_for_recovery()
+            if escape_action == 'arc':
+                direction = 'left' if escape_value > 0.0 else 'right'
+                maneuver = f'guarded rolling {direction} arc'
+                self.send_command_status(
+                    command,
+                    'started',
+                    f'Nav2 reported a blocked start; checking a {direction} arc',
+                )
+                escaped, escape_output = self.guarded_arc_for_recovery(
+                    escape_value
+                )
+            elif escape_action == 'spin':
+                direction = 'left' if escape_value > 0.0 else 'right'
+                maneuver = f'collision-checked {direction} turn'
+                self.send_command_status(
+                    command,
+                    'started',
+                    f'Nav2 reported a blocked start; checking a {direction} turn',
+                )
+                escaped, escape_output = self.spin_for_recovery(escape_value)
+            else:
+                maneuver = 'guarded reverse'
+                self.send_command_status(
+                    command,
+                    'started',
+                    'Nav2 reported a blocked start; checking a guarded reverse escape',
+                )
+                escaped, escape_output = self.guarded_reverse_for_recovery()
             if not escaped:
                 detail = (
-                    f'{original_detail}; guarded reverse was stopped or refused '
+                    f'{original_detail}; {maneuver} was stopped or refused '
                     f'({scan_detail}): {escape_output or "no response"}'
                 )
                 self.get_logger().error(
@@ -3937,7 +4475,7 @@ class WebBridgeNode(Node):
             lifecycle_ok, lifecycle_detail = self.wait_for_recovery_lifecycle()
             if not lifecycle_ok:
                 detail = (
-                    'Guarded reverse completed, but Nav2 did not return to an '
+                    f'{maneuver.capitalize()} completed, but Nav2 did not return to an '
                     f'active state: {lifecycle_detail}'
                 )
                 self.get_logger().error(
@@ -3946,27 +4484,35 @@ class WebBridgeNode(Node):
                 self.send_navigation_result(command, 'aborted', detail[:500])
                 return
 
-            turn = self.stall_escape_decision(prefer_turn=True)
-            if turn.action == 'spin':
-                turned, turn_output = self.spin_for_recovery(turn.value)
-                if turned:
-                    self.get_logger().warning(
-                        f'Blocked-pose recovery for {command_id} completed '
-                        f'a scan-gated turn: {turn.detail}'
-                    )
-                else:
-                    # The turn is an additional escape opportunity. A refused
-                    # turn must remain stopped, but a fresh route may still be
-                    # safe after the completed guarded reverse.
-                    self.get_logger().warning(
-                        f'Optional turn for {command_id} was not completed: '
-                        f'{turn_output}'
-                    )
+            if escape_action == 'back_up':
+                maneuver_ok, maneuver_detail = (
+                    self.run_alternative_escape_maneuvers(command_id)
+                )
+            else:
+                maneuver_ok = True
+                maneuver_detail = (
+                    f'{maneuver} ({scan_detail}): '
+                    f'{escape_output or "completed"}'
+                )
+            if not maneuver_ok:
+                detail = (
+                    'Guarded reverse completed, but alternative escape motion '
+                    f'was stopped: {maneuver_detail}'
+                )
+                self.get_logger().error(
+                    f'Blocked-pose recovery for {command_id} failed: {detail}'
+                )
+                self.send_navigation_result(command, 'aborted', detail[:500])
+                return
+            self.get_logger().warning(
+                f'Blocked-pose recovery maneuvers for {command_id}: '
+                f'{maneuver_detail}'
+            )
 
             cleared, clear_output = self.clear_recovery_costmaps()
             if not cleared:
                 detail = (
-                    'Guarded reverse completed, but Nav2 costmaps could not be '
+                    f'{maneuver.capitalize()} completed, but Nav2 costmaps could not be '
                     f'cleared: {clear_output or "no response"}'
                 )
                 self.get_logger().error(
@@ -3993,7 +4539,8 @@ class WebBridgeNode(Node):
             if not planned:
                 failure = classify_plan_failure(plan_output)
                 detail = (
-                    'Guarded reverse completed, but the route is still unavailable: '
+                    f'{maneuver.capitalize()} completed, but the route is still '
+                    'unavailable: '
                     f'{failure}: {plan_output or "planner returned no path"}'
                 )
                 self.get_logger().error(
@@ -4218,7 +4765,7 @@ class WebBridgeNode(Node):
             'robot_id': self.robot_id,
             'lifecycle': lifecycle,
             'timestamp': datetime.now(timezone.utc).isoformat(),
-            'detail': detail,
+            'detail': str(detail)[:500],
         }
 
     def process_cancel_queue(self) -> bool:
@@ -5537,10 +6084,11 @@ class WebBridgeNode(Node):
         status: str,
         detail: str,
     ) -> None:
+        bounded_detail = str(detail)[:500]
         self.send_command_status(
             command,
             'succeeded' if status == 'succeeded' else 'failed',
-            detail,
+            bounded_detail,
         )
         self.send_from_ros(
             {
@@ -5549,7 +6097,7 @@ class WebBridgeNode(Node):
                 'task_id': command.get('task_id'),
                 'stage': command.get('stage'),
                 'status': status,
-                'detail': detail,
+                'detail': bounded_detail,
             }
         )
 
@@ -5636,11 +6184,7 @@ class WebBridgeNode(Node):
         self.emergency_stop_latched.clear()
         self.physical_estop_latched.clear()
         self.mapping_runtime.shutdown()
-        self.destroy_timer(self.preview_timer)
-        self.destroy_timer(self.emergency_zero_timer)
-        self.destroy_timer(self.physical_estop_watchdog_timer)
-        self.destroy_timer(self.mapping_deadman_timer)
-        self.destroy_timer(self.mapping_pose_timer)
+        self.destroy_timer(self.periodic_timer)
         self.destroy_publisher(
             self.emergency_velocity_publisher
         )

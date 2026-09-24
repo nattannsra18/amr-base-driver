@@ -17,8 +17,6 @@ def test_systemd_service_starts_agent_from_external_profile_and_env():
     assert 'Restart=always' in service
     assert 'NoNewPrivileges=false' in service
     assert 'ReadWritePaths=/var/lib/indoor-delivery-robot' in service
-
-
 def test_deployment_environment_keeps_runtime_values_out_of_source():
     environment = (
         PACKAGE_ROOT / 'deploy' / 'robot-agent.env.example'

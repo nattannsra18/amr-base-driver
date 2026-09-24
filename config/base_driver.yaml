@@ -12,6 +12,9 @@ amr_base_serial_bridge:
     accel_scale: 0.9372
     max_rpm: 90.0
     cmd_vel_timeout: 0.25
+    # Keep stall detection at the MCU's 100 Hz while publishing sensors at
+    # about 33 Hz, safely above the EKF's 20 Hz rate with lower DDS fan-out.
+    telemetry_publish_divisor: 3
     enable_motors: false
     odom_frame: odom
     base_frame: base_footprint

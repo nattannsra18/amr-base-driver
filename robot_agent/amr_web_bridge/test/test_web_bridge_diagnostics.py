@@ -2,6 +2,7 @@ from queue import Queue
 import threading
 import time
 
+from amr_web_bridge.stall_escape import StallEscapeDecision
 from amr_web_bridge.web_bridge_node import WebBridgeNode
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 import pytest
@@ -276,6 +277,9 @@ def test_reset_motor_stall_requires_stop_and_diagnostic_confirmation():
             return True, 'success: true'
 
     bridge.navigation_recovery_runner = Runner()
+    bridge.wait_for_recovery_lifecycle = lambda: (True, 'active')
+    bridge.clear_recovery_costmaps = lambda: (True, 'cleared')
+    bridge.compute_recovery_path = lambda _target: (True, 'path available')
 
     succeeded, detail = bridge.reset_motor_stall()
     assert succeeded is True
@@ -313,6 +317,9 @@ def test_reset_motor_stall_clears_host_no_wheel_feedback_fault():
             return True, 'success: true'
 
     bridge.navigation_recovery_runner = Runner()
+    bridge.wait_for_recovery_lifecycle = lambda: (True, 'active')
+    bridge.clear_recovery_costmaps = lambda: (True, 'cleared')
+    bridge.compute_recovery_path = lambda _target: (True, 'path available')
 
     succeeded, detail = bridge.reset_motor_stall()
     assert succeeded is True
@@ -390,11 +397,13 @@ def test_reset_motor_stall_uses_safe_scan_escape_before_resuming_goal():
             ]
             return True, 'success: true'
 
-        def back_up(self, distance):
-            assert distance == 0.10
+        def guarded_reverse(self):
             return True, 'status: SUCCEEDED'
 
     bridge.navigation_recovery_runner = Runner()
+    bridge.wait_for_recovery_lifecycle = lambda: (True, 'active')
+    bridge.clear_recovery_costmaps = lambda: (True, 'cleared')
+    bridge.compute_recovery_path = lambda _target: (True, 'path available')
 
     succeeded, detail = bridge.reset_motor_stall()
     assert succeeded is True
@@ -403,7 +412,7 @@ def test_reset_motor_stall_uses_safe_scan_escape_before_resuming_goal():
     assert results == []
 
 
-def test_reset_motor_stall_turns_once_when_straight_reverse_is_refused():
+def test_reset_motor_stall_uses_rolling_arc_when_reverse_is_refused():
     bridge = make_bridge()
     bridge.velocity_lock = threading.Lock()
     bridge.latest_velocity = {
@@ -430,10 +439,10 @@ def test_reset_motor_stall_turns_once_when_straight_reverse_is_refused():
     bridge.send_navigation_result = lambda *_args: None
     message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
     message.status[0].values = [
-        KeyValue(key='mcu_fault', value='0'),
-        KeyValue(key='host_motion_fault', value=''),
-        KeyValue(key='host_motion_state', value='PRE_STALL'),
-        KeyValue(key='host_motion_reason', value='RIGHT_NO_WHEEL_FEEDBACK'),
+        KeyValue(key='mcu_fault', value='3'),
+        KeyValue(key='host_motion_fault', value='RIGHT_ENCODER_STALL'),
+        KeyValue(key='host_motion_state', value='FAULTED'),
+        KeyValue(key='host_motion_reason', value='RIGHT_ENCODER_STALL'),
         KeyValue(key='motors_enabled', value='True'),
     ]
     bridge.diagnostics_callback(message)
@@ -441,32 +450,420 @@ def test_reset_motor_stall_turns_once_when_straight_reverse_is_refused():
 
     class Runner:
         def clear_motor_fault(self):
+            status = bridge.latest_diagnostics['statuses'][0]
+            status['values'] = [
+                {'key': 'mcu_fault', 'value': '0'},
+                {'key': 'host_motion_fault', 'value': ''},
+                {'key': 'host_motion_state', 'value': 'NORMAL'},
+                {'key': 'host_motion_reason', 'value': ''},
+                {'key': 'motors_enabled', 'value': 'True'},
+            ]
             return True, 'success: true'
 
-        def back_up(self, distance):
-            maneuvers.append(('back_up', distance))
+        def guarded_reverse(self):
+            maneuvers.append(('guarded_reverse', 0.10))
             return False, 'backup timed out'
 
-        def spin(self, yaw):
-            maneuvers.append(('spin', yaw))
+        def guarded_arc(self, yaw):
+            maneuvers.append(('arc', yaw))
             return True, 'status: SUCCEEDED'
 
-        def finish_motor_recovery(self, success):
-            maneuvers.append(('finish', success))
-            return True, 'success: true'
-
     bridge.navigation_recovery_runner = Runner()
+    bridge.wait_for_recovery_lifecycle = lambda: (True, 'active')
+    bridge.clear_recovery_costmaps = lambda: (True, 'cleared')
+    bridge.compute_recovery_path = lambda _target: (True, 'path available')
 
     succeeded, detail = bridge.reset_motor_stall()
 
     assert succeeded is True
     assert maneuvers == [
-        ('back_up', 0.10),
-        ('spin', 0.26),
+        ('guarded_reverse', 0.10),
+        ('arc', 0.22),
+    ]
+    assert 'guarded rolling left arc' in detail
+    assert bridge.command_queue.get_nowait() == active
+
+
+def test_reset_motor_stall_tries_other_arc_and_replans_before_resume():
+    bridge = make_bridge()
+    bridge.velocity_lock = threading.Lock()
+    bridge.latest_velocity = {
+        'linear_velocity': 0.0,
+        'angular_velocity': 0.0,
+    }
+    bridge.last_odom_monotonic = time.monotonic()
+    bridge.publish_zero_velocity = lambda: None
+    active = {
+        'command_id': 'command-alternate-turn',
+        'task_id': 'TASK-ALTERNATE',
+        'target': {'frame_id': 'map', 'x': 1.0, 'y': 2.0, 'yaw': 0.0},
+    }
+    bridge.cancel_active_navigation_for_operation = lambda **_kwargs: active
+    bridge.command_queue = Queue()
+    bridge.send_navigation_result = lambda *_args: None
+    bridge.stall_escape_decision = lambda **_kwargs: StallEscapeDecision(
+        action='arc',
+        value=0.22,
+        clearance=0.50,
+        detail='rolling reverse left arc',
+    )
+    bridge.stall_arc_decisions = lambda: (
+        StallEscapeDecision(
+            action='arc', value=0.22, clearance=0.50,
+            detail='rolling reverse left arc',
+        ),
+        StallEscapeDecision(
+            action='arc', value=-0.22, clearance=0.48,
+            detail='rolling reverse right arc',
+        ),
+    )
+    message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    message.status[0].values = [
+        KeyValue(key='mcu_fault', value='2'),
+        KeyValue(key='host_motion_fault', value='LEFT_ENCODER_STALL'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    bridge.diagnostics_callback(message)
+    maneuvers = []
+
+    class Runner:
+        def clear_motor_fault(self):
+            status = bridge.latest_diagnostics['statuses'][0]
+            status['values'] = [
+                {'key': 'mcu_fault', 'value': '0'},
+                {'key': 'host_motion_fault', 'value': ''},
+                {'key': 'motors_enabled', 'value': 'True'},
+            ]
+            return True, 'cleared'
+
+        def guarded_arc(self, yaw):
+            maneuvers.append(('arc', yaw))
+            return (yaw < 0.0), ('right completed' if yaw < 0.0 else 'timeout')
+
+    bridge.navigation_recovery_runner = Runner()
+    bridge.wait_for_recovery_lifecycle = lambda: (True, 'active')
+    bridge.clear_recovery_costmaps = lambda: (
+        maneuvers.append(('clear', 0.0)) or (True, 'cleared')
+    )
+    bridge.compute_recovery_path = lambda target: (
+        maneuvers.append(('plan', target['x'])) or (True, 'path available')
+    )
+
+    succeeded, detail = bridge.reset_motor_stall()
+
+    assert succeeded is True
+    assert maneuvers == [
+        ('arc', 0.22),
+        ('arc', -0.22),
+        ('clear', 0.0),
+        ('plan', 1.0),
+    ]
+    assert 'guarded rolling right arc' in detail
+    assert bridge.command_queue.get_nowait() == active
+
+
+def test_fresh_pre_stall_during_escape_opens_one_final_recovery_window():
+    bridge = make_bridge()
+    bridge.velocity_lock = threading.Lock()
+    bridge.latest_velocity = {
+        'linear_velocity': 0.0,
+        'angular_velocity': 0.0,
+    }
+    bridge.last_odom_monotonic = time.monotonic()
+    bridge.publish_zero_velocity = lambda: None
+    active = {
+        'command_id': 'command-fresh-pre-stall',
+        'task_id': 'TASK-FRESH-PRE-STALL',
+        'target': {'frame_id': 'map', 'x': 1.0, 'y': 2.0, 'yaw': 0.0},
+    }
+    bridge.cancel_active_navigation_for_operation = lambda **_kwargs: active
+    bridge.command_queue = Queue()
+    bridge.send_navigation_result = lambda *_args: None
+    bridge.stall_escape_decision = lambda **_kwargs: StallEscapeDecision(
+        action='arc', value=0.22, clearance=0.50,
+        detail='rolling reverse left arc',
+    )
+    bridge.stall_arc_decisions = lambda: (
+        StallEscapeDecision(
+            action='arc', value=0.22, clearance=0.50,
+            detail='rolling reverse left arc',
+        ),
+        StallEscapeDecision(
+            action='arc', value=-0.22, clearance=0.48,
+            detail='rolling reverse right arc',
+        ),
+    )
+    message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    message.status[0].values = [
+        KeyValue(key='mcu_fault', value='2'),
+        KeyValue(key='host_motion_fault', value='LEFT_ENCODER_STALL'),
+        KeyValue(key='host_motion_state', value='FAULTED'),
+        KeyValue(key='host_motion_reason', value='LEFT_ENCODER_STALL'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    bridge.diagnostics_callback(message)
+    calls = []
+
+    def set_motor_state(state, *, fault='', reason='', mcu=0):
+        bridge.latest_diagnostics['statuses'][0]['values'] = [
+            {'key': 'mcu_fault', 'value': str(mcu)},
+            {'key': 'host_motion_fault', 'value': fault},
+            {'key': 'host_motion_state', 'value': state},
+            {'key': 'host_motion_reason', 'value': reason},
+            {'key': 'motors_enabled', 'value': 'True'},
+        ]
+
+    class Runner:
+        def clear_motor_fault(self):
+            calls.append('clear')
+            if calls.count('clear') == 1:
+                set_motor_state('NORMAL')
+                return True, 'latched fault cleared'
+            set_motor_state(
+                'RECOVERING', reason='RIGHT_NO_WHEEL_FEEDBACK',
+            )
+            return True, 'pre-stall recovery authorized once'
+
+        def guarded_arc(self, yaw):
+            calls.append(('arc', yaw))
+            if yaw > 0.0:
+                set_motor_state(
+                    'PRE_STALL', reason='RIGHT_NO_WHEEL_FEEDBACK',
+                )
+                return False, 'left arc lost right wheel feedback'
+            set_motor_state(
+                'RECOVERING', reason='RIGHT_NO_WHEEL_FEEDBACK',
+            )
+            return True, 'right arc completed'
+
+        def finish_motor_recovery(self, success):
+            calls.append(('finish', success))
+            set_motor_state(
+                'VERIFYING_RECOVERY' if success else 'FAULTED',
+                fault='' if success else 'RIGHT_NO_WHEEL_FEEDBACK',
+                reason='RIGHT_NO_WHEEL_FEEDBACK',
+            )
+            return True, 'recovery result recorded'
+
+    bridge.navigation_recovery_runner = Runner()
+    bridge.wait_for_recovery_lifecycle = lambda: (True, 'active')
+    bridge.clear_recovery_costmaps = lambda: (True, 'cleared')
+    bridge.compute_recovery_path = lambda _target: (True, 'path available')
+
+    succeeded, detail = bridge.reset_motor_stall()
+
+    assert succeeded is True
+    assert calls == [
+        'clear',
+        ('arc', 0.22),
+        'clear',
+        ('arc', -0.22),
         ('finish', True),
     ]
-    assert 'short left turn' in detail
+    assert 'guarded rolling right arc' in detail
     assert bridge.command_queue.get_nowait() == active
+
+
+def test_pre_stall_recovery_failure_latches_without_second_maneuver():
+    bridge = make_bridge()
+    bridge.velocity_lock = threading.Lock()
+    bridge.latest_velocity = {
+        'linear_velocity': 0.0,
+        'angular_velocity': 0.0,
+    }
+    bridge.last_odom_monotonic = time.monotonic()
+    bridge.publish_zero_velocity = lambda: None
+    active = {
+        'command_id': 'command-existing-pre-stall',
+        'task_id': 'TASK-EXISTING-PRE-STALL',
+        'target': {'frame_id': 'map', 'x': 1.0, 'y': 2.0, 'yaw': 0.0},
+    }
+    bridge.cancel_active_navigation_for_operation = lambda **_kwargs: active
+    bridge.send_navigation_result = lambda *_args: None
+    bridge.stall_escape_decision = lambda **_kwargs: StallEscapeDecision(
+        action='arc', value=0.22, clearance=0.50,
+        detail='rolling reverse left arc',
+    )
+    bridge.stall_arc_decisions = lambda: (
+        StallEscapeDecision(
+            action='arc', value=-0.22, clearance=0.48,
+            detail='rolling reverse right arc',
+        ),
+    )
+    message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    message.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='PRE_STALL'),
+        KeyValue(key='host_motion_reason', value='LEFT_NO_WHEEL_FEEDBACK'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    bridge.diagnostics_callback(message)
+    calls = []
+
+    class Runner:
+        def clear_motor_fault(self):
+            calls.append('clear')
+            bridge.latest_diagnostics['statuses'][0]['values'] = [
+                {'key': 'mcu_fault', 'value': '0'},
+                {'key': 'host_motion_fault', 'value': ''},
+                {'key': 'host_motion_state', 'value': 'RECOVERING'},
+                {
+                    'key': 'host_motion_reason',
+                    'value': 'LEFT_NO_WHEEL_FEEDBACK',
+                },
+                {'key': 'motors_enabled', 'value': 'True'},
+            ]
+            return True, 'pre-stall recovery authorized once'
+
+        def guarded_arc(self, yaw):
+            calls.append(('arc', yaw))
+            return False, 'arc timed out'
+
+        def finish_motor_recovery(self, success):
+            calls.append(('finish', success))
+            return True, 'recovery failed and fault latched'
+
+    bridge.navigation_recovery_runner = Runner()
+
+    succeeded, detail = bridge.reset_motor_stall()
+
+    assert succeeded is False
+    assert calls == ['clear', ('arc', 0.22), ('finish', False)]
+    assert 'one authorized recovery attempt' in detail
+
+
+def test_pre_stall_guard_refusal_tries_scan_safe_arc_in_same_window():
+    bridge = make_bridge()
+    bridge.velocity_lock = threading.Lock()
+    bridge.latest_velocity = {
+        'linear_velocity': 0.0,
+        'angular_velocity': 0.0,
+    }
+    bridge.last_odom_monotonic = time.monotonic()
+    bridge.publish_zero_velocity = lambda: None
+    active = {
+        'command_id': 'command-pre-stall-refusal',
+        'task_id': 'TASK-PRE-STALL-REFUSAL',
+        'target': {'frame_id': 'map', 'x': 1.0, 'y': 2.0, 'yaw': 0.0},
+    }
+    bridge.cancel_active_navigation_for_operation = lambda **_kwargs: active
+    bridge.command_queue = Queue()
+    results = []
+    bridge.send_navigation_result = lambda *_args: results.append(_args)
+    bridge.stall_escape_decision = lambda **_kwargs: StallEscapeDecision(
+        action='back_up', value=0.10, clearance=0.45,
+        detail='rear clearance 0.45 m',
+    )
+    bridge.stall_arc_decisions = lambda: (
+        StallEscapeDecision(
+            action='arc', value=-0.22, clearance=0.52,
+            detail='rolling reverse right arc',
+        ),
+    )
+    message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    message.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='PRE_STALL'),
+        KeyValue(key='host_motion_reason', value='RIGHT_NO_WHEEL_FEEDBACK'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    bridge.diagnostics_callback(message)
+    calls = []
+
+    def set_motor_state(state):
+        bridge.latest_diagnostics['statuses'][0]['values'] = [
+            {'key': 'mcu_fault', 'value': '0'},
+            {'key': 'host_motion_fault', 'value': ''},
+            {'key': 'host_motion_state', 'value': state},
+            {'key': 'host_motion_reason', 'value': 'RIGHT_NO_WHEEL_FEEDBACK'},
+            {'key': 'motors_enabled', 'value': 'True'},
+        ]
+
+    class Runner:
+        def clear_motor_fault(self):
+            calls.append('clear')
+            set_motor_state('RECOVERING')
+            return True, 'pre-stall recovery authorized once'
+
+        def guarded_reverse(self):
+            calls.append('reverse')
+            return False, (
+                'Guarded reverse refused: rear clearance 0.44 m is below 0.45 m'
+            )
+
+        def guarded_arc(self, yaw):
+            calls.append(('arc', yaw))
+            return True, 'Guarded right arc completed'
+
+        def finish_motor_recovery(self, success):
+            calls.append(('finish', success))
+            set_motor_state('VERIFYING_RECOVERY' if success else 'FAULTED')
+            return True, 'recovery result recorded'
+
+    bridge.navigation_recovery_runner = Runner()
+    bridge.wait_for_recovery_lifecycle = lambda: (True, 'active')
+    bridge.clear_recovery_costmaps = lambda: (True, 'cleared')
+    bridge.compute_recovery_path = lambda _target: (True, 'path available')
+
+    succeeded, detail = bridge.reset_motor_stall()
+
+    assert succeeded is True
+    assert calls == [
+        'clear',
+        'reverse',
+        ('arc', -0.22),
+        ('finish', True),
+    ]
+    assert 'guarded rolling right arc' in detail
+    assert bridge.command_queue.get_nowait() == active
+    assert results == []
+
+
+def test_pre_stall_without_active_goal_latches_without_moving():
+    bridge = make_bridge()
+    bridge.velocity_lock = threading.Lock()
+    bridge.latest_velocity = {
+        'linear_velocity': 0.0,
+        'angular_velocity': 0.0,
+    }
+    bridge.last_odom_monotonic = time.monotonic()
+    bridge.publish_zero_velocity = lambda: None
+    bridge.cancel_active_navigation_for_operation = lambda **_kwargs: None
+    message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    message.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='PRE_STALL'),
+        KeyValue(key='host_motion_reason', value='LEFT_NO_WHEEL_FEEDBACK'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    bridge.diagnostics_callback(message)
+    calls = []
+
+    class Runner:
+        def clear_motor_fault(self):
+            calls.append('clear')
+            return True, 'pre-stall recovery authorized once'
+
+        def finish_motor_recovery(self, success):
+            calls.append(('finish', success))
+            return True, 'pending fault latched'
+
+        def guarded_reverse(self):
+            raise AssertionError('the robot must not move without an active goal')
+
+        def guarded_arc(self, _yaw):
+            raise AssertionError('the robot must not move without an active goal')
+
+    bridge.navigation_recovery_runner = Runner()
+
+    succeeded, detail = bridge.reset_motor_stall()
+
+    assert succeeded is False
+    assert calls == ['clear', ('finish', False)]
+    assert 'latched without moving the robot' in detail
 
 
 def test_reset_motor_stall_keeps_fault_latched_without_safe_escape():
@@ -506,20 +903,41 @@ def test_reset_motor_stall_keeps_fault_latched_without_safe_escape():
     assert results[0][1] == 'aborted'
 
 
-def test_automatic_stall_recovery_is_one_shot_for_active_command(monkeypatch):
+def test_later_recovery_episodes_choose_alternative_safe_arcs():
     bridge = make_bridge()
+    reverse = StallEscapeDecision(action='back_up', value=0.10)
+    left = StallEscapeDecision(action='arc', value=0.22)
+    right = StallEscapeDecision(action='arc', value=-0.22)
+    bridge.stall_escape_decision = lambda: reverse
+    bridge.stall_arc_decisions = lambda: (left, right)
+
+    assert bridge.stall_escape_for_recovery_episode(1) == reverse
+    assert bridge.stall_escape_for_recovery_episode(2) == left
+    assert bridge.stall_escape_for_recovery_episode(3) == right
+
+
+def configure_automatic_stall_recovery(bridge):
     bridge.command_lock = threading.Lock()
-    bridge.active_command = {'command_id': 'command-auto'}
     bridge.emergency_stop_latched = threading.Event()
     bridge.physical_estop_latched = threading.Event()
     bridge.robot_operation_lock = threading.Lock()
     bridge.robot_operation_active = False
     bridge.automatic_stall_recovery_lock = threading.Lock()
     bridge.automatic_stall_recovery_active = False
-    bridge.automatic_stall_recovery_attempted_ids = set()
+    bridge.automatic_stall_recovery_attempt_counts = {}
+    bridge.automatic_stall_fault_active = False
+    bridge.automatic_stall_fault_epoch = 0
+    bridge.automatic_stall_recovery_last_epochs = {}
+    bridge.automatic_stall_recovery_max_episodes = 3
+
+
+def test_automatic_stall_recovery_runs_once_per_fault_episode(monkeypatch):
+    bridge = make_bridge()
+    configure_automatic_stall_recovery(bridge)
+    bridge.active_command = {'command_id': 'command-auto'}
     bridge.get_logger = lambda: StubLogger()
     calls = []
-    bridge.reset_motor_stall = lambda: (
+    bridge.reset_motor_stall = lambda **_kwargs: (
         calls.append('recover') or (True, 'escaped')
     )
     message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
@@ -542,26 +960,165 @@ def test_automatic_stall_recovery_is_one_shot_for_active_command(monkeypatch):
 
     bridge.maybe_start_automatic_stall_recovery()
     bridge.maybe_start_automatic_stall_recovery()
+    bridge.maybe_start_automatic_stall_recovery()
 
     assert calls == ['recover']
-    assert bridge.automatic_stall_recovery_attempted_ids == {'command-auto'}
+    assert bridge.automatic_stall_recovery_attempt_counts == {'command-auto': 1}
     assert bridge.robot_operation_active is False
+
+
+def test_automatic_stall_recovery_allows_new_episode_after_healthy_state(
+    monkeypatch,
+):
+    bridge = make_bridge()
+    configure_automatic_stall_recovery(bridge)
+    bridge.active_command = {'command_id': 'command-auto'}
+    bridge.get_logger = lambda: StubLogger()
+    calls = []
+    bridge.reset_motor_stall = lambda **_kwargs: (
+        calls.append('recover') or (True, 'escaped')
+    )
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(threading, 'Thread', ImmediateThread)
+
+    stalled = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    stalled.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='PRE_STALL'),
+        KeyValue(key='host_motion_reason', value='RIGHT_NO_WHEEL_FEEDBACK'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    healthy = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    healthy.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='NORMAL'),
+        KeyValue(key='host_motion_reason', value=''),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+
+    bridge.diagnostics_callback(stalled)
+    bridge.maybe_start_automatic_stall_recovery()
+    bridge.maybe_start_automatic_stall_recovery()
+    bridge.diagnostics_callback(healthy)
+    bridge.maybe_start_automatic_stall_recovery()
+    bridge.diagnostics_callback(stalled)
+    bridge.maybe_start_automatic_stall_recovery()
+
+    assert calls == ['recover', 'recover']
+    assert bridge.automatic_stall_recovery_attempt_counts == {'command-auto': 2}
+    assert bridge.automatic_stall_fault_epoch == 2
+
+
+def test_automatic_stall_recovery_does_not_rearm_while_base_is_recovering(
+    monkeypatch,
+):
+    bridge = make_bridge()
+    configure_automatic_stall_recovery(bridge)
+    bridge.active_command = {'command_id': 'command-auto'}
+    bridge.get_logger = lambda: StubLogger()
+    calls = []
+    bridge.reset_motor_stall = lambda **_kwargs: (
+        calls.append('recover') or (True, 'escaped')
+    )
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(threading, 'Thread', ImmediateThread)
+
+    stalled = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    stalled.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='PRE_STALL'),
+        KeyValue(key='host_motion_reason', value='RIGHT_NO_WHEEL_FEEDBACK'),
+    ]
+    recovering = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    recovering.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='RECOVERING'),
+        KeyValue(key='host_motion_reason', value='RIGHT_NO_WHEEL_FEEDBACK'),
+    ]
+
+    bridge.diagnostics_callback(stalled)
+    bridge.maybe_start_automatic_stall_recovery()
+    bridge.diagnostics_callback(recovering)
+    bridge.maybe_start_automatic_stall_recovery()
+    bridge.diagnostics_callback(stalled)
+    bridge.maybe_start_automatic_stall_recovery()
+
+    assert calls == ['recover']
+    assert bridge.automatic_stall_fault_epoch == 1
+
+
+def test_automatic_stall_recovery_caps_independent_episodes(monkeypatch):
+    bridge = make_bridge()
+    configure_automatic_stall_recovery(bridge)
+    bridge.active_command = {'command_id': 'command-auto'}
+    bridge.get_logger = lambda: StubLogger()
+    calls = []
+    bridge.reset_motor_stall = lambda **_kwargs: (
+        calls.append('recover') or (True, 'escaped')
+    )
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(threading, 'Thread', ImmediateThread)
+
+    stalled = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    stalled.status[0].values = [
+        KeyValue(key='mcu_fault', value='2'),
+        KeyValue(key='host_motion_fault', value='LEFT_ENCODER_STALL'),
+        KeyValue(key='host_motion_state', value='FAULTED'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    healthy = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    healthy.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='NORMAL'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+
+    for _ in range(4):
+        bridge.diagnostics_callback(stalled)
+        bridge.maybe_start_automatic_stall_recovery()
+        bridge.diagnostics_callback(healthy)
+        bridge.maybe_start_automatic_stall_recovery()
+
+    assert calls == ['recover', 'recover', 'recover']
+    assert bridge.automatic_stall_recovery_attempt_counts == {'command-auto': 3}
 
 
 def test_automatic_recovery_starts_for_pre_stall(monkeypatch):
     bridge = make_bridge()
-    bridge.command_lock = threading.Lock()
+    configure_automatic_stall_recovery(bridge)
     bridge.active_command = {'command_id': 'command-pre-stall'}
-    bridge.emergency_stop_latched = threading.Event()
-    bridge.physical_estop_latched = threading.Event()
-    bridge.robot_operation_lock = threading.Lock()
-    bridge.robot_operation_active = False
-    bridge.automatic_stall_recovery_lock = threading.Lock()
-    bridge.automatic_stall_recovery_active = False
-    bridge.automatic_stall_recovery_attempted_ids = set()
     bridge.get_logger = lambda: StubLogger()
     calls = []
-    bridge.reset_motor_stall = lambda: (
+    bridge.reset_motor_stall = lambda **_kwargs: (
         calls.append('recover') or (True, 'escaped before latch')
     )
     message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
@@ -586,6 +1143,6 @@ def test_automatic_recovery_starts_for_pre_stall(monkeypatch):
     bridge.maybe_start_automatic_stall_recovery()
 
     assert calls == ['recover']
-    assert bridge.automatic_stall_recovery_attempted_ids == {
-        'command-pre-stall'
+    assert bridge.automatic_stall_recovery_attempt_counts == {
+        'command-pre-stall': 1,
     }

@@ -203,3 +203,31 @@ def test_navigation_command_id_is_idempotent_after_leaving_queue():
     assert value.command_queue.empty()
     assert value.sent[-1]['accepted'] is True
     assert 'already' in value.sent[-1]['detail']
+
+
+def test_navigation_result_details_respect_backend_length_limit():
+    value = SimpleNamespace(robot_id='robot01', sent=[])
+    value.send_from_ros = value.sent.append
+    value.command_status_payload = (
+        lambda command, lifecycle, detail: WebBridgeNode.command_status_payload(
+            value, command, lifecycle, detail,
+        )
+    )
+    value.send_command_status = (
+        lambda command, lifecycle, detail: WebBridgeNode.send_command_status(
+            value, command, lifecycle, detail,
+        )
+    )
+    command = {
+        'command_id': 'command-long-detail',
+        'task_id': 'TASK-LONG',
+        'stage': 'pickup',
+    }
+
+    WebBridgeNode.send_navigation_result(value, command, 'aborted', 'x' * 900)
+
+    assert [message['type'] for message in value.sent] == [
+        'command_status',
+        'navigation_result',
+    ]
+    assert all(len(message['detail']) == 500 for message in value.sent)

@@ -25,16 +25,104 @@ def choose_stall_escape(
     range_min: float,
     range_max: float,
     rear_required: float = 0.45,
+    arc_rear_required: float = 0.32,
     side_required: float = 0.40,
 ) -> StallEscapeDecision:
     """
-    Choose reverse first, then a short turn toward the clearer side.
+    Choose a straight reverse first, then a rolling reverse arc.
 
-    The behavior server performs the final footprint/costmap collision check.
-    This scan gate prevents even requesting a maneuver into a visibly blocked
-    sector and never returns an unconstrained velocity command.
+    Pure in-place spins are intentionally excluded because the physical
+    passive-caster base has not passed an attended pivot floor test.  The
+    selected primitive still performs its own live scan and odometry checks.
     """
-    sectors: dict[str, list[float]] = {
+    clearances = _sector_clearances(
+        ranges,
+        angle_min=angle_min,
+        angle_increment=angle_increment,
+        range_min=range_min,
+        range_max=range_max,
+    )
+    rear = clearances['rear']
+    left = clearances['left']
+    right = clearances['right']
+    if rear >= rear_required:
+        return StallEscapeDecision(
+            action='back_up',
+            value=0.10,
+            clearance=rear,
+            detail=f'rear clearance {rear:.2f} m',
+        )
+    arcs = _arc_decisions(
+        clearances,
+        rear_required=arc_rear_required,
+        side_required=side_required,
+    )
+    if arcs:
+        return arcs[0]
+    return StallEscapeDecision(
+        action='none',
+        detail=(
+            'no safe escape sector '
+            f'(rear={rear:.2f} m, left={left:.2f} m, right={right:.2f} m)'
+        ),
+    )
+
+
+def choose_stall_arcs(
+    ranges: Iterable[float],
+    *,
+    angle_min: float,
+    angle_increment: float,
+    range_min: float,
+    range_max: float,
+    rear_required: float = 0.32,
+    side_required: float = 0.40,
+) -> tuple[StallEscapeDecision, ...]:
+    """Return scan-safe rolling reverse arcs, clearest side first."""
+    clearances = _sector_clearances(
+        ranges,
+        angle_min=angle_min,
+        angle_increment=angle_increment,
+        range_min=range_min,
+        range_max=range_max,
+    )
+    return _arc_decisions(
+        clearances,
+        rear_required=rear_required,
+        side_required=side_required,
+    )
+
+
+def choose_stall_turns(
+    ranges: Iterable[float],
+    *,
+    angle_min: float,
+    angle_increment: float,
+    range_min: float,
+    range_max: float,
+    side_required: float = 0.40,
+) -> tuple[StallEscapeDecision, ...]:
+    """Return every scan-safe short turn, ordered by available clearance."""
+    clearances = _sector_clearances(
+        ranges,
+        angle_min=angle_min,
+        angle_increment=angle_increment,
+        range_min=range_min,
+        range_max=range_max,
+    )
+    return _turn_decisions(clearances, side_required=side_required)
+
+
+def _sector_clearances(
+    ranges: Iterable[float],
+    *,
+    angle_min: float,
+    angle_increment: float,
+    range_min: float,
+    range_max: float,
+) -> dict[str, float]:
+    ranges = tuple(ranges)
+    sectors: dict[str, list[tuple[int, float]]] = {
         'rear': [],
         'left': [],
         'right': [],
@@ -50,55 +138,97 @@ def choose_stall_escape(
         angle = _normalize_angle(angle_min + index * angle_increment)
         degrees = math.degrees(angle)
         if abs(degrees) >= 150.0:
-            sectors['rear'].append(distance)
+            sectors['rear'].append((index, distance))
         elif 50.0 <= degrees <= 130.0:
-            sectors['left'].append(distance)
+            sectors['left'].append((index, distance))
         elif -130.0 <= degrees <= -50.0:
-            sectors['right'].append(distance)
+            sectors['right'].append((index, distance))
 
-    clearances = {
-        name: _robust_clearance(values)
+    return {
+        name: _adjacent_cluster_clearance(values, beam_count=len(ranges))
         for name, values in sectors.items()
     }
-    rear = clearances['rear']
-    left = clearances['left']
-    right = clearances['right']
-    if rear >= rear_required:
-        return StallEscapeDecision(
-            action='back_up',
-            value=0.10,
-            clearance=rear,
-            detail=f'rear clearance {rear:.2f} m',
-        )
-    best_side = max(left, right)
-    if best_side >= side_required:
-        turn_left = left >= right
-        return StallEscapeDecision(
+
+
+def _turn_decisions(
+    clearances: dict[str, float],
+    *,
+    side_required: float,
+) -> tuple[StallEscapeDecision, ...]:
+    candidates = sorted(
+        (
+            ('left', clearances['left'], 0.26),
+            ('right', clearances['right'], -0.26),
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return tuple(
+        StallEscapeDecision(
             action='spin',
-            value=0.26 if turn_left else -0.26,
-            clearance=best_side,
+            value=yaw,
+            clearance=clearance,
             detail=(
-                f'{"left" if turn_left else "right"} clearance '
-                f'{best_side:.2f} m; rear clearance {rear:.2f} m'
+                f'{side} clearance {clearance:.2f} m; '
+                f'rear clearance {clearances["rear"]:.2f} m'
             ),
         )
-    return StallEscapeDecision(
-        action='none',
-        detail=(
-            'no safe escape sector '
-            f'(rear={rear:.2f} m, left={left:.2f} m, right={right:.2f} m)'
-        ),
+        for side, clearance, yaw in candidates
+        if clearance >= side_required
     )
 
 
-def _robust_clearance(values: list[float]) -> float:
-    if len(values) < 3:
-        return 0.0
-    ordered = sorted(values)
-    # Ignore at most the lowest ten percent of isolated speckle returns while
-    # remaining conservative over the rest of the sector.
-    index = min(len(ordered) - 1, max(0, int(len(ordered) * 0.10)))
-    return ordered[index]
+def _arc_decisions(
+    clearances: dict[str, float],
+    *,
+    rear_required: float,
+    side_required: float,
+) -> tuple[StallEscapeDecision, ...]:
+    rear = clearances['rear']
+    if rear < rear_required:
+        return ()
+    candidates = sorted(
+        (
+            ('left', clearances['left'], 0.22),
+            ('right', clearances['right'], -0.22),
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return tuple(
+        StallEscapeDecision(
+            action='arc',
+            value=yaw,
+            clearance=min(rear, side_clearance),
+            detail=(
+                f'rolling reverse {side} arc; rear clearance {rear:.2f} m, '
+                f'{side} clearance {side_clearance:.2f} m'
+            ),
+        )
+        for side, side_clearance, yaw in candidates
+        if side_clearance >= side_required
+    )
+
+
+def _adjacent_cluster_clearance(
+    values: list[tuple[int, float]],
+    *,
+    beam_count: int,
+) -> float:
+    """Use the nearest two adjacent beams so thin chair legs are not hidden."""
+    ordered = sorted(values, key=lambda item: item[0])
+    candidates = [
+        max(previous[1], current[1])
+        for previous, current in zip(ordered, ordered[1:])
+        if current[0] == previous[0] + 1
+    ]
+    if (
+        len(ordered) >= 2
+        and ordered[0][0] == 0
+        and ordered[-1][0] == beam_count - 1
+    ):
+        candidates.append(max(ordered[0][1], ordered[-1][1]))
+    return min(candidates) if candidates else 0.0
 
 
 def _normalize_angle(value: float) -> float:

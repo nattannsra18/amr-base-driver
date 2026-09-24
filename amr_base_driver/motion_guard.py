@@ -75,7 +75,10 @@ class MotionGuard:
             return False
         self.recovery_in_progress = False
         self.healthy_since = None
-        if not success:
+        # A wheel can fail on the opposite side while the authorized escape
+        # is running.  Preserve that fresh, observed fault instead of
+        # replacing it with the reason which opened the recovery window.
+        if not success and not self.fault:
             self.fault = self.recovery_reason or 'WHEEL_RECOVERY_FAILED'
         return True
 
