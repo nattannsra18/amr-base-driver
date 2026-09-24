@@ -21,7 +21,7 @@ from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import ComputePathToPose, NavigateToPose
-from nav2_msgs.srv import LoadMap
+from nav2_msgs.srv import ClearEntireCostmap, LoadMap, ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 import rclpy
 from rclpy.action import ActionClient
@@ -66,6 +66,7 @@ from .path_utils import (
     serialize_preview_path,
 )
 from .profile_validator import validate_robot_profile
+from .recovery_services import call_empty_service, call_service
 from .stall_escape import choose_stall_escape, StallEscapeDecision
 
 
@@ -580,6 +581,14 @@ class WebBridgeNode(Node):
             ComputePathToPose,
             self.compute_path_action,
         )
+        # Recovery runs from a worker thread after Nav2 aborts a goal. Keep a
+        # warm action client in this node's DDS participant so recovery never
+        # launches a fresh ``ros2 action send_goal`` process under load.
+        self.recovery_plan_client = ActionClient(
+            self,
+            ComputePathToPose,
+            self.compute_path_action,
+        )
         self.load_map_client = self.create_client(
             LoadMap,
             self.load_map_service,
@@ -588,6 +597,10 @@ class WebBridgeNode(Node):
             GetState,
             self.amcl_state_service,
         )
+        self.localization_lifecycle_client = self.create_client(
+            ManageLifecycleNodes,
+            '/lifecycle_manager_localization/manage_nodes',
+        )
         self.global_localization_client = self.create_client(
             EmptyService,
             self.global_localization_service,
@@ -595,6 +608,17 @@ class WebBridgeNode(Node):
         # These clients stay in the node's DDS participant.  They avoid
         # launching a fresh ``ros2 service call`` process at the exact moment
         # a pre-stall needs to be handled.
+        self.recovery_lifecycle_clients = [
+            (name, self.create_client(GetState, f'{name}/get_state'))
+            for name in ('/planner_server', '/controller_server', '/bt_navigator')
+        ]
+        self.recovery_costmap_clients = [
+            (name, self.create_client(ClearEntireCostmap, name))
+            for name in (
+                '/local_costmap/clear_entirely_local_costmap',
+                '/global_costmap/clear_entirely_global_costmap',
+            )
+        ]
         self.clear_motor_fault_client = self.create_client(
             Trigger,
             '/clear_motor_fault',
@@ -1008,8 +1032,13 @@ class WebBridgeNode(Node):
 
     def amcl_state_callback(self, future: Any) -> None:
         try:
-            label = str(future.result().current_state.label).lower()
-            state = 'ACTIVE' if label == 'active' else 'INACTIVE'
+            lifecycle_state = future.result().current_state
+            label = str(lifecycle_state.label).strip().lower()
+            state = (
+                'ACTIVE'
+                if int(lifecycle_state.id) == 3 or label == 'active'
+                else 'INACTIVE'
+            )
         except Exception:
             state = 'UNKNOWN'
         with self.localization_lock:
@@ -2462,26 +2491,24 @@ class WebBridgeNode(Node):
             return
         action = str(command['action'])
         if action == 'SET_INITIAL_POSE':
-            pose = command['pose']
-            self.publish_initial_pose(
-                float(pose['x']),
-                float(pose['y']),
-                float(pose['yaw']),
-                position_uncertainty=float(command['position_uncertainty']),
-                yaw_uncertainty=float(command['yaw_uncertainty']),
-            )
             with self.localization_lock:
-                self.localization_recovery_count += 1
-                self.localization_recovery_active = False
-                self.localization_recovery_started_monotonic = None
-                self.localization_convergence_samples = 0
-                self.localization_scan_active = False
-                self.localization_scan_started_monotonic = None
-            self.finish_localization_command(
-                command,
-                True,
-                'Initial pose published to AMCL',
-            )
+                amcl_state = self.amcl_state
+            if amcl_state == 'INACTIVE':
+                if not self.localization_lifecycle_client.service_is_ready():
+                    self.finish_localization_command(
+                        command,
+                        False,
+                        'AMCL is inactive and the localization lifecycle manager is unavailable',
+                    )
+                    return
+                request = ManageLifecycleNodes.Request()
+                request.command = ManageLifecycleNodes.Request.RESUME
+                future = self.localization_lifecycle_client.call_async(request)
+                future.add_done_callback(
+                    lambda result: self.localization_resume_callback(result, command)
+                )
+                return
+            self.publish_initial_pose_command(command)
             return
         if not self.global_localization_client.service_is_ready():
             self.finish_localization_command(
@@ -2493,6 +2520,47 @@ class WebBridgeNode(Node):
         future = self.global_localization_client.call_async(EmptyService.Request())
         future.add_done_callback(
             lambda result: self.global_localization_callback(result, command)
+        )
+
+    def localization_resume_callback(
+        self,
+        future: Any,
+        command: dict[str, Any],
+    ) -> None:
+        try:
+            response = future.result()
+            if not response.success:
+                raise RuntimeError('localization lifecycle manager rejected resume')
+            with self.localization_lock:
+                self.amcl_state = 'UNKNOWN'
+            self.publish_initial_pose_command(command)
+        except Exception as error:
+            self.finish_localization_command(
+                command,
+                False,
+                f'Unable to activate AMCL before setting the initial pose: {error}',
+            )
+
+    def publish_initial_pose_command(self, command: dict[str, Any]) -> None:
+        pose = command['pose']
+        self.publish_initial_pose(
+            float(pose['x']),
+            float(pose['y']),
+            float(pose['yaw']),
+            position_uncertainty=float(command['position_uncertainty']),
+            yaw_uncertainty=float(command['yaw_uncertainty']),
+        )
+        with self.localization_lock:
+            self.localization_recovery_count += 1
+            self.localization_recovery_active = True
+            self.localization_recovery_started_monotonic = time.monotonic()
+            self.localization_convergence_samples = 0
+            self.localization_scan_active = False
+            self.localization_scan_started_monotonic = None
+        self.finish_localization_command(
+            command,
+            True,
+            'Initial pose published; waiting for AMCL pose and map transform',
         )
 
     def global_localization_callback(
@@ -3425,6 +3493,24 @@ class WebBridgeNode(Node):
             # and every early return after begin_recovery().
             finish_pre_stall(False)
 
+    def recovery_lifecycle_healthy(self) -> tuple[bool, str]:
+        """Worker-thread only; accept the numeric ACTIVE lifecycle state."""
+        for name, client in self.recovery_lifecycle_clients:
+            response, detail = call_service(client, GetState.Request())
+            if response is None:
+                return False, f'{name}: {detail}'
+            if response.current_state.id != 3:
+                return False, f'{name}: {response.current_state.label}'
+        return True, 'Navigation lifecycle nodes are active'
+
+    def clear_recovery_costmaps(self) -> tuple[bool, str]:
+        """Worker-thread only: reuse discovered clients instead of spawning CLI."""
+        for name, client in self.recovery_costmap_clients:
+            ok, detail = call_empty_service(client, ClearEntireCostmap.Request())
+            if not ok:
+                return False, f'{name}: {detail}'
+        return True, 'Local and global costmaps cleared'
+
     def recover_navigation(self, operation: dict[str, Any]) -> tuple[bool, str]:
         mapping_phase = self.mapping_runtime.snapshot(self.map_revision).get('phase')
         if mapping_phase != 'IDLE':
@@ -3449,9 +3535,7 @@ class WebBridgeNode(Node):
                 f"{localization.get('detail') or 'AMCL is not localized'}"
             )
 
-        lifecycle_ok, lifecycle_detail = (
-            self.navigation_recovery_runner.nav2_lifecycle_healthy()
-        )
+        lifecycle_ok, lifecycle_detail = self.recovery_lifecycle_healthy()
         if not lifecycle_ok:
             return False, (
                 'No connected path: Nav2 lifecycle is not active; '
@@ -3459,11 +3543,11 @@ class WebBridgeNode(Node):
                 f'{lifecycle_detail}'
             )
 
-        cleared, clear_detail = self.navigation_recovery_runner.clear_costmaps()
+        cleared, clear_detail = self.clear_recovery_costmaps()
         if not cleared:
             return False, f'No connected path: costmap clear failed: {clear_detail}'
 
-        planned, output = self.navigation_recovery_runner.compute_path(target)
+        planned, output = self.compute_recovery_path(target)
         if not planned:
             failure = classify_plan_failure(output)
             return False, f'{failure}: {output or "planner returned no path"}'
@@ -3579,7 +3663,7 @@ class WebBridgeNode(Node):
                 self.send_navigation_result(command, 'aborted', detail[:500])
                 return
 
-            cleared, clear_output = self.navigation_recovery_runner.clear_costmaps()
+            cleared, clear_output = self.clear_recovery_costmaps()
             if not cleared:
                 detail = (
                     'Guarded reverse completed, but Nav2 costmaps could not be '
@@ -3592,9 +3676,7 @@ class WebBridgeNode(Node):
                 self.send_navigation_result(command, 'aborted', detail[:500])
                 return
 
-            planned, plan_output = self.navigation_recovery_runner.compute_path(
-                command['target']
-            )
+            planned, plan_output = self.compute_recovery_path(command['target'])
             if not planned:
                 failure = classify_plan_failure(plan_output)
                 detail = (
@@ -4084,6 +4166,123 @@ class WebBridgeNode(Node):
         goal.planner_id = ''
         goal.use_start = use_start
         return goal
+
+    def build_recovery_plan_goal(
+        self,
+        target: dict[str, Any],
+    ) -> ComputePathToPose.Goal:
+        goal = ComputePathToPose.Goal()
+        yaw = float(target['yaw'])
+        goal.goal.header.stamp = self.get_clock().now().to_msg()
+        goal.goal.header.frame_id = str(target['frame_id'])
+        goal.goal.pose.position.x = float(target['x'])
+        goal.goal.pose.position.y = float(target['y'])
+        goal.goal.pose.position.z = 0.0
+        goal.goal.pose.orientation.z = math.sin(yaw / 2.0)
+        goal.goal.pose.orientation.w = math.cos(yaw / 2.0)
+        goal.planner_id = 'GridBased'
+        goal.use_start = False
+        return goal
+
+    def compute_recovery_path(
+        self,
+        target: dict[str, Any],
+        timeout_seconds: float = 15.0,
+    ) -> tuple[bool, str]:
+        """
+        Verify a route synchronously from a recovery worker thread.
+
+        The node's executor continues spinning on the main thread and resolves
+        these action futures. Reusing this node's DDS participant avoids the
+        discovery delay and CPU burst caused by a new ``ros2`` CLI process.
+        """
+        if not self.recovery_plan_client.wait_for_server(timeout_sec=1.0):
+            return False, 'Planner unavailable: ComputePathToPose action is unavailable'
+
+        completed = threading.Event()
+        result: dict[str, Any] = {
+            'success': False,
+            'detail': 'Planner unavailable: no recovery result was received',
+            'closed': False,
+        }
+        result_lock = threading.Lock()
+
+        def finish(success: bool, detail: str) -> None:
+            with result_lock:
+                if result['closed']:
+                    return
+                result['success'] = success
+                result['detail'] = detail
+                result['closed'] = True
+            completed.set()
+
+        def receive_result(future: Any) -> None:
+            try:
+                wrapped = future.result()
+                action_result = wrapped.result
+            except Exception as error:
+                finish(False, f'Planner unavailable: failed to receive result: {error}')
+                return
+
+            error_code = int(getattr(action_result, 'error_code', 0))
+            if (
+                wrapped.status != GoalStatus.STATUS_SUCCEEDED
+                or error_code != 0
+            ):
+                error_message = str(
+                    getattr(action_result, 'error_msg', '')
+                    or 'Nav2 could not compute a connected recovery path'
+                )
+                finish(
+                    False,
+                    f'{error_message} (error_code: {error_code}, '
+                    f'goal_status: {wrapped.status})',
+                )
+                return
+
+            path = getattr(action_result, 'path', None)
+            pose_count = len(getattr(path, 'poses', [])) if path is not None else 0
+            if pose_count == 0:
+                finish(False, 'Nav2 planner returned an empty recovery path')
+                return
+            finish(True, f'Nav2 computed a connected path with {pose_count} poses')
+
+        def receive_goal(future: Any) -> None:
+            try:
+                goal_handle = future.result()
+            except Exception as error:
+                finish(False, f'Planner unavailable: failed to send goal: {error}')
+                return
+            if not goal_handle.accepted:
+                finish(False, 'Planner unavailable: recovery path request was rejected')
+                return
+            with result_lock:
+                result['goal_handle'] = goal_handle
+            goal_handle.get_result_async().add_done_callback(receive_result)
+
+        try:
+            goal_future = self.recovery_plan_client.send_goal_async(
+                self.build_recovery_plan_goal(target)
+            )
+            goal_future.add_done_callback(receive_goal)
+        except Exception as error:
+            return False, f'Planner unavailable: failed to request route: {error}'
+
+        if not completed.wait(timeout=max(0.1, float(timeout_seconds))):
+            with result_lock:
+                result['closed'] = True
+                goal_handle = result.get('goal_handle')
+            if goal_handle is not None:
+                try:
+                    goal_handle.cancel_goal_async()
+                except Exception:
+                    pass
+            return False, (
+                'Planner timeout: ComputePathToPose did not return within '
+                f'{float(timeout_seconds):.1f} seconds'
+            )
+
+        return bool(result['success']), str(result['detail'])
 
     def send_preview_leg(
         self,

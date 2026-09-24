@@ -18,7 +18,9 @@ RestartSec=3
 TimeoutStopSec=20
 KillSignal=SIGINT
 
-NoNewPrivileges=true
+# The Agent may elevate only the three exact commands allowlisted in its
+# dedicated sudoers file. All arbitrary sudo/systemctl commands remain denied.
+NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only

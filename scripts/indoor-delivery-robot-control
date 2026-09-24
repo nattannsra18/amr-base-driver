@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly NAVIGATION_SERVICE="indoor-delivery-robot-navigation.service"
+
+[[ "$EUID" -eq 0 ]] || { printf 'This helper must run as root.\n' >&2; exit 1; }
+
+case "${1:-}" in
+  start-navigation)
+    systemctl start "$NAVIGATION_SERVICE"
+    ;;
+  restart-navigation)
+    systemctl restart "$NAVIGATION_SERVICE"
+    ;;
+  stop-navigation)
+    systemctl stop "$NAVIGATION_SERVICE"
+    ;;
+  poweroff)
+    # Delay poweroff long enough for the Agent to acknowledge the command.
+    systemd-run --quiet --unit=indoor-delivery-robot-poweroff \
+      --on-active=3s /usr/bin/systemctl poweroff
+    ;;
+  *)
+    printf 'Usage: %s {start-navigation|restart-navigation|stop-navigation|poweroff}\n' "$0" >&2
+    exit 2
+    ;;
+esac

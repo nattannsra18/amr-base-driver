@@ -41,6 +41,30 @@ def test_controller_uses_regulated_pure_pursuit_without_reversing():
     assert controller['rotate_to_heading_angular_vel'] == 0.60
     assert controller['max_angular_accel'] == 6.0
     assert controller['allow_reversing'] is False
+    assert controller['lookahead_dist'] == 0.22
+    assert controller['min_lookahead_dist'] == 0.18
+    assert controller['max_lookahead_dist'] == 0.35
+
+
+def test_progress_checker_counts_heading_alignment_without_extending_stall_timeout():
+    params = load_nav2_params()['controller_server']['ros__parameters']
+    checker = params['progress_checker']
+    assert checker['plugin'] == 'nav2_controller::PoseProgressChecker'
+    assert checker['required_movement_radius'] == 0.05
+    assert checker['required_movement_angle'] == 0.15
+    assert checker['movement_time_allowance'] == 4.0
+    assert params['failure_tolerance'] == 0.5
+
+
+def test_smac_planner_and_narrow_corridor_inflation_are_configured():
+    params = load_nav2_params()
+    planner = params['planner_server']['ros__parameters']['GridBased']
+    assert planner['plugin'] == 'nav2_smac_planner::SmacPlanner2D'
+    assert planner['cost_travel_multiplier'] == 2.0
+    for name in ('local_costmap', 'global_costmap'):
+        inflation = params[name][name]['ros__parameters']['inflation_layer']
+        assert inflation['inflation_radius'] == 0.30
+        assert inflation['cost_scaling_factor'] == 7.0
 
 
 def test_progress_checker_hands_off_to_recovery_promptly():
@@ -60,6 +84,9 @@ def test_behavior_server_exposes_only_bounded_recovery_plugins():
     assert behavior['behavior_plugins'] == ['backup', 'spin', 'wait']
     assert behavior['robot_base_frame'] == 'base_footprint'
     assert behavior['simulate_ahead_time'] == 2.0
+    assert behavior['max_rotational_vel'] == 0.25
+    assert behavior['min_rotational_vel'] == 0.18
+    assert behavior['rotational_acc_lim'] == 0.35
 
 
 def test_behavior_tree_uses_short_backup_without_automatic_spin():
@@ -74,6 +101,10 @@ def test_behavior_tree_uses_short_backup_without_automatic_spin():
     assert 'backup_speed="0.08"' in tree
     assert 'time_allowance="4.0"' in tree
     assert tree.index('<BackUp') < tree.index('<Sequence name="ClearBothCostmaps">')
+    assert 'name="ComputePathRecovery"' in tree
+    assert 'name="FollowPathRecovery"' in tree
+    assert 'ClearGlobalCostmapForPlanner' in tree
+    assert 'ClearLocalCostmapForController' in tree
 
 
 def test_navigation_launch_starts_and_manages_behavior_server():

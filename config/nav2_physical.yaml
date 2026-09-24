@@ -12,11 +12,14 @@ controller_server:
     controller_plugins: ["FollowPath"]
 
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
+      plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.05
       # A wedged chassis can still report wheel motion, so the encoder guard
       # cannot always detect it.  Hand control to the collision-checked
       # recovery tree promptly instead of waiting 15 seconds per retry.
+      # Heading alignment is real progress, even before translation starts.
+      # Keep a bounded timeout for a chassis which is genuinely stationary.
+      required_movement_angle: 0.15
       movement_time_allowance: 4.0
 
     goal_checker:

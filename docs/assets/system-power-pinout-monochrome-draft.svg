@@ -1,0 +1,355 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1200"
+     viewBox="0 0 1800 1200" role="img"
+     aria-labelledby="title description">
+  <title id="title">AMR electrical interconnect and GPIO assignment</title>
+  <desc id="description">
+    Monochrome engineering schematic showing the dual power sources, ODROID-C4,
+    ESP32 expansion board, TB6612FNG, motors, encoders, MPU6050, YDLidar X3,
+    UART, I2C, motor control signals, and common ground.
+  </desc>
+
+  <defs>
+    <style>
+      .border { fill: #fff; stroke: #111; stroke-width: 2; }
+      .thin { fill: none; stroke: #111; stroke-width: 1.4; }
+      .wire { fill: none; stroke: #111; stroke-width: 2; }
+      .power { fill: none; stroke: #111; stroke-width: 4; }
+      .ground { fill: none; stroke: #111; stroke-width: 3; }
+      .optional { fill: none; stroke: #111; stroke-width: 1.5;
+                  stroke-dasharray: 8 6; }
+      .junction { fill: #111; stroke: none; }
+      .open { fill: #fff; stroke: #111; stroke-width: 1.7; }
+      .component { fill: #fff; stroke: #111; stroke-width: 2.2; }
+      .subtle { fill: #f4f4f4; stroke: #111; stroke-width: 1.5; }
+      .title { font: 700 27px Arial,Helvetica,sans-serif; fill: #111; }
+      .sheet { font: 700 18px Arial,Helvetica,sans-serif; fill: #111; }
+      .ref { font: 700 16px Arial,Helvetica,sans-serif; fill: #111; }
+      .name { font: 700 19px Arial,Helvetica,sans-serif; fill: #111; }
+      .label { font: 600 13px Arial,Helvetica,sans-serif; fill: #111;
+               paint-order: stroke; stroke: #fff; stroke-width: 5px; }
+      .body { font: 400 13px Arial,Helvetica,sans-serif; fill: #111; }
+      .small { font: 400 11px Arial,Helvetica,sans-serif; fill: #111; }
+      .mono { font: 500 12px Consolas,'Liberation Mono',monospace; fill: #111; }
+      .mono-head { font: 700 13px Consolas,'Liberation Mono',monospace; fill: #111; }
+      .pin { font: 500 11px Consolas,'Liberation Mono',monospace; fill: #111; }
+      .pin-no { font: 700 11px Consolas,'Liberation Mono',monospace; fill: #111; }
+      .note { font: 600 12px Arial,Helvetica,sans-serif; fill: #111; }
+    </style>
+    <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+      <path d="M20 0H0V20" fill="none" stroke="#000" stroke-width="0.35"
+            opacity="0.12"/>
+    </pattern>
+  </defs>
+
+  <!-- Drawing frame -->
+  <rect x="28" y="28" width="1744" height="1144" class="border"/>
+  <rect x="42" y="42" width="1716" height="1116" fill="url(#grid)"
+        stroke="#111" stroke-width="1"/>
+  <rect x="42" y="42" width="1716" height="72" fill="#fff"
+        stroke="#111" stroke-width="1.5"/>
+  <text x="66" y="76" class="title">AMR ELECTRICAL INTERCONNECT &amp; GPIO ASSIGNMENT</text>
+  <text x="66" y="99" class="body">
+    ODROID-C4 · ESP32-WROOM · TB6612FNG · YDLIDAR X3 · MPU6050 · DUAL TT MOTOR DRIVE
+  </text>
+  <rect x="1450" y="52" width="284" height="48" fill="#fff"
+        stroke="#111" stroke-width="2"/>
+  <text x="1592" y="73" text-anchor="middle" class="ref">DRAFT FOR REVIEW</text>
+  <text x="1592" y="91" text-anchor="middle" class="small">NOT FOR WIRING / CONSTRUCTION</text>
+
+  <!-- Functional region labels -->
+  <rect x="62" y="132" width="169" height="28" fill="#fff" stroke="#111"/>
+  <text x="146" y="151" text-anchor="middle" class="ref">POWER DISTRIBUTION</text>
+  <rect x="610" y="132" width="154" height="28" fill="#fff" stroke="#111"/>
+  <text x="687" y="151" text-anchor="middle" class="ref">BASE CONTROLLER</text>
+  <rect x="1125" y="132" width="135" height="28" fill="#fff" stroke="#111"/>
+  <text x="1192" y="151" text-anchor="middle" class="ref">DRIVE STAGE</text>
+
+  <!-- 2S battery symbol -->
+  <g>
+    <text x="72" y="195" class="ref">BT1</text>
+    <text x="72" y="216" class="name">2S 18650 BATTERY PACK</text>
+    <text x="72" y="235" class="body">5000 mAh · 7.4 V nominal · 8.4 V maximum</text>
+    <line x1="103" y1="270" x2="103" y2="330" class="thin"/>
+    <line x1="120" y1="258" x2="120" y2="342" class="power"/>
+    <line x1="153" y1="270" x2="153" y2="330" class="thin"/>
+    <line x1="170" y1="258" x2="170" y2="342" class="power"/>
+    <line x1="75" y1="300" x2="103" y2="300" class="power"/>
+    <line x1="120" y1="300" x2="153" y2="300" class="power"/>
+    <line x1="170" y1="300" x2="205" y2="300" class="power"/>
+    <text x="71" y="291" class="ref">−</text>
+    <text x="190" y="291" class="ref">+</text>
+  </g>
+
+  <!-- Fuse and cutoff -->
+  <g>
+    <text x="255" y="255" class="ref">F1</text>
+    <text x="255" y="274" class="body">3 A FUSE*</text>
+    <line x1="205" y1="300" x2="258" y2="300" class="power"/>
+    <rect x="258" y="286" width="76" height="28" class="component"/>
+    <line x1="270" y1="300" x2="322" y2="300" class="wire"/>
+    <line x1="334" y1="300" x2="385" y2="300" class="power"/>
+    <text x="377" y="255" class="ref">S1</text>
+    <text x="377" y="274" class="body">MOTOR CUTOFF*</text>
+    <circle cx="399" cy="300" r="5" class="junction"/>
+    <circle cx="470" cy="300" r="5" class="junction"/>
+    <line x1="399" y1="300" x2="457" y2="270" class="wire"/>
+    <line x1="470" y1="300" x2="530" y2="300" class="power"/>
+  </g>
+
+  <!-- 2S bus -->
+  <line x1="530" y1="300" x2="1080" y2="300" class="power"/>
+  <circle cx="650" cy="300" r="5" class="junction"/>
+  <circle cx="1080" cy="300" r="5" class="junction"/>
+  <text x="780" y="287" class="label">VBAT_2S · 7.4 V NOM / 8.4 V MAX</text>
+
+  <!-- ESP32 carrier/controller -->
+  <g>
+    <rect x="650" y="205" width="365" height="485" class="component"/>
+    <rect x="662" y="217" width="341" height="54" class="subtle"/>
+    <text x="675" y="239" class="ref">U1</text>
+    <text x="710" y="239" class="name">ESP32-WROOM BASE CONTROLLER</text>
+    <text x="675" y="260" class="body">38-pin ESP32 DevKit on 38-pin I/O expansion carrier</text>
+
+    <line x1="650" y1="300" x2="690" y2="300" class="power"/>
+    <text x="698" y="304" class="pin-no">DC IN</text>
+    <text x="698" y="321" class="small">carrier marking: 6.5–16 V</text>
+
+    <rect x="735" y="345" width="196" height="240" class="thin"/>
+    <text x="833" y="375" text-anchor="middle" class="ref">ESP32</text>
+    <text x="833" y="396" text-anchor="middle" class="body">wheel PI + telemetry</text>
+    <text x="833" y="417" text-anchor="middle" class="body">300 ms command watchdog</text>
+    <line x1="748" y1="448" x2="918" y2="448" class="thin"/>
+    <text x="752" y="474" class="pin">UART2 RX  GPIO34</text>
+    <text x="752" y="495" class="pin">UART2 TX  GPIO23</text>
+    <text x="752" y="516" class="pin">I2C SDA   GPIO21</text>
+    <text x="752" y="537" class="pin">I2C SCL   GPIO22</text>
+    <text x="752" y="558" class="pin">STBY      GPIO32</text>
+
+    <!-- left pins -->
+    <line x1="650" y1="405" x2="622" y2="405" class="wire"/>
+    <text x="658" y="409" class="pin">GPIO34 RX2</text>
+    <line x1="650" y1="435" x2="622" y2="435" class="wire"/>
+    <text x="658" y="439" class="pin">GPIO23 TX2</text>
+    <line x1="650" y1="500" x2="622" y2="500" class="wire"/>
+    <text x="658" y="504" class="pin">GPIO21 SDA</text>
+    <line x1="650" y1="530" x2="622" y2="530" class="wire"/>
+    <text x="658" y="534" class="pin">GPIO22 SCL</text>
+
+    <!-- right motor pins -->
+    <line x1="1015" y1="355" x2="1043" y2="355" class="wire"/>
+    <text x="1007" y="359" text-anchor="end" class="pin">GPIO14 PWMA</text>
+    <line x1="1015" y1="380" x2="1043" y2="380" class="wire"/>
+    <text x="1007" y="384" text-anchor="end" class="pin">GPIO18 AIN1</text>
+    <line x1="1015" y1="405" x2="1043" y2="405" class="wire"/>
+    <text x="1007" y="409" text-anchor="end" class="pin">GPIO19 AIN2</text>
+    <line x1="1015" y1="440" x2="1043" y2="440" class="wire"/>
+    <text x="1007" y="444" text-anchor="end" class="pin">GPIO27 PWMB</text>
+    <line x1="1015" y1="465" x2="1043" y2="465" class="wire"/>
+    <text x="1007" y="469" text-anchor="end" class="pin">GPIO16 BIN1</text>
+    <line x1="1015" y1="490" x2="1043" y2="490" class="wire"/>
+    <text x="1007" y="494" text-anchor="end" class="pin">GPIO17 BIN2</text>
+    <line x1="1015" y1="525" x2="1043" y2="525" class="wire"/>
+    <text x="1007" y="529" text-anchor="end" class="pin">GPIO32 STBY</text>
+
+    <!-- right encoder pins -->
+    <line x1="1015" y1="585" x2="1043" y2="585" class="wire"/>
+    <text x="1007" y="589" text-anchor="end" class="pin">GPIO25 ENC_L_A</text>
+    <line x1="1015" y1="610" x2="1043" y2="610" class="wire"/>
+    <text x="1007" y="614" text-anchor="end" class="pin">GPIO26 ENC_L_B</text>
+    <line x1="1015" y1="635" x2="1043" y2="635" class="wire"/>
+    <text x="1007" y="639" text-anchor="end" class="pin">GPIO35 ENC_R_A</text>
+    <line x1="1015" y1="660" x2="1043" y2="660" class="wire"/>
+    <text x="1007" y="664" text-anchor="end" class="pin">GPIO33 ENC_R_B</text>
+  </g>
+
+  <!-- TB6612 motor driver -->
+  <g>
+    <rect x="1140" y="225" width="285" height="360" class="component"/>
+    <rect x="1152" y="237" width="261" height="48" class="subtle"/>
+    <text x="1166" y="258" class="ref">U2</text>
+    <text x="1202" y="258" class="name">TB6612FNG</text>
+    <text x="1166" y="278" class="body">dual H-bridge motor driver</text>
+
+    <line x1="1080" y1="300" x2="1140" y2="300" class="power"/>
+    <text x="1150" y="304" class="pin-no">VM</text>
+    <text x="1166" y="330" class="pin">VCC  LOGIC RAIL***</text>
+
+    <text x="1166" y="365" class="pin">PWMA</text>
+    <text x="1166" y="390" class="pin">AIN1</text>
+    <text x="1166" y="415" class="pin">AIN2</text>
+    <text x="1166" y="450" class="pin">PWMB</text>
+    <text x="1166" y="475" class="pin">BIN1</text>
+    <text x="1166" y="500" class="pin">BIN2</text>
+    <text x="1166" y="535" class="pin">STBY</text>
+
+    <path d="M1043 355H1100V365H1140 M1043 380H1090V390H1140
+             M1043 405H1080V415H1140 M1043 440H1070V450H1140
+             M1043 465H1060V475H1140 M1043 490H1050V500H1140
+             M1043 525H1045V535H1140" class="wire"/>
+
+    <line x1="1425" y1="350" x2="1480" y2="350" class="power"/>
+    <line x1="1425" y1="390" x2="1480" y2="390" class="power"/>
+    <line x1="1425" y1="470" x2="1480" y2="470" class="power"/>
+    <line x1="1425" y1="510" x2="1480" y2="510" class="power"/>
+    <text x="1392" y="354" text-anchor="end" class="pin">AO1</text>
+    <text x="1392" y="394" text-anchor="end" class="pin">AO2</text>
+    <text x="1392" y="474" text-anchor="end" class="pin">BO1</text>
+    <text x="1392" y="514" text-anchor="end" class="pin">BO2</text>
+  </g>
+
+  <!-- Motors -->
+  <g>
+    <text x="1530" y="307" class="ref">M1 · LEFT DRIVE</text>
+    <circle cx="1585" cy="370" r="49" class="component"/>
+    <text x="1585" y="379" text-anchor="middle" class="sheet">M</text>
+    <line x1="1480" y1="350" x2="1538" y2="350" class="power"/>
+    <line x1="1480" y1="390" x2="1538" y2="390" class="power"/>
+
+    <text x="1530" y="427" class="ref">M2 · RIGHT DRIVE</text>
+    <circle cx="1585" cy="490" r="49" class="component"/>
+    <text x="1585" y="499" text-anchor="middle" class="sheet">M</text>
+    <line x1="1480" y1="470" x2="1538" y2="470" class="power"/>
+    <line x1="1480" y1="510" x2="1538" y2="510" class="power"/>
+  </g>
+
+  <!-- Encoders -->
+  <g>
+    <rect x="1490" y="570" width="225" height="86" class="component"/>
+    <text x="1503" y="591" class="ref">E1 · LEFT ENCODER</text>
+    <text x="1503" y="616" class="pin">A → GPIO25</text>
+    <text x="1503" y="638" class="pin">B → GPIO26</text>
+    <path d="M1490 610H1380V585H1043 M1490 635H1360V610H1043" class="wire"/>
+
+    <rect x="1490" y="676" width="225" height="100" class="component"/>
+    <text x="1503" y="697" class="ref">E2 · RIGHT ENCODER</text>
+    <text x="1503" y="722" class="pin">A → GPIO35</text>
+    <text x="1503" y="744" class="pin">B → GPIO33</text>
+    <text x="1503" y="765" class="small">GPIO35: external pull-up required</text>
+    <path d="M1490 716H1340V635H1043 M1490 741H1320V660H1043" class="wire"/>
+  </g>
+
+  <!-- Power bank and ODROID -->
+  <g>
+    <text x="72" y="465" class="ref">PB1</text>
+    <text x="72" y="486" class="name">POWER BANK · 5000 mAh</text>
+    <rect x="72" y="508" width="210" height="100" class="component"/>
+    <rect x="95" y="531" width="58" height="54" class="thin"/>
+    <line x1="111" y1="522" x2="137" y2="522" class="power"/>
+    <text x="170" y="548" class="body">5 V OUTPUT</text>
+    <text x="170" y="571" class="body">ODROID supply only</text>
+    <line x1="282" y1="558" x2="360" y2="558" class="power"/>
+    <text x="295" y="547" class="label">+5V_COMPUTE</text>
+
+    <rect x="360" y="435" width="250" height="270" class="component"/>
+    <rect x="372" y="447" width="226" height="48" class="subtle"/>
+    <text x="385" y="468" class="ref">U3</text>
+    <text x="422" y="468" class="name">ODROID-C4</text>
+    <text x="385" y="488" class="body">Ubuntu 24.04 · ROS 2 Jazzy</text>
+    <text x="385" y="535" class="pin">5 V IN</text>
+    <text x="385" y="579" class="pin">PIN 32 · UART_EE_C TX</text>
+    <text x="385" y="609" class="pin">PIN 26 · UART_EE_C RX</text>
+    <text x="385" y="639" class="pin">PIN 6  · GND</text>
+    <text x="385" y="678" class="pin">USB HOST</text>
+
+    <path d="M610 575H620V405H650" class="wire"/>
+    <path d="M610 605H630V435H650" class="wire"/>
+    <text x="512" y="564" class="label">TX → RX2</text>
+    <text x="512" y="625" class="label">RX ← TX2</text>
+  </g>
+
+  <!-- LiDAR -->
+  <g>
+    <rect x="72" y="660" width="225" height="110" class="component"/>
+    <text x="86" y="683" class="ref">LS1 · YDLIDAR X3</text>
+    <circle cx="126" cy="724" r="27" class="thin"/>
+    <line x1="99" y1="724" x2="153" y2="724" class="thin"/>
+    <line x1="126" y1="697" x2="126" y2="751" class="thin"/>
+    <text x="168" y="714" class="body">USB power + data</text>
+    <text x="168" y="738" class="mono">/scan_raw</text>
+    <path d="M360 675H325V715H297" class="wire"/>
+    <text x="301" y="701" class="label">USB</text>
+  </g>
+
+  <!-- MPU6050 -->
+  <g>
+    <rect x="1120" y="630" width="250" height="115" class="component"/>
+    <text x="1134" y="653" class="ref">U4 · MPU6050</text>
+    <text x="1134" y="677" class="body">6-axis accelerometer / gyroscope</text>
+    <text x="1134" y="705" class="pin">SDA → GPIO21</text>
+    <text x="1134" y="728" class="pin">SCL → GPIO22</text>
+    <path d="M1120 695H1080V500H1043 M1120 720H1060V530H1043" class="wire"/>
+  </g>
+
+  <!-- Common ground bus -->
+  <line x1="72" y1="820" x2="1715" y2="820" class="ground"/>
+  <path d="M75 300V820 M485 705V820 M650 675V820 M1282 585V820
+           M1602 656V820 M1602 776V820 M1245 745V820" class="ground"/>
+  <circle cx="75" cy="820" r="5" class="junction"/>
+  <circle cx="485" cy="820" r="5" class="junction"/>
+  <circle cx="650" cy="820" r="5" class="junction"/>
+  <circle cx="1282" cy="820" r="5" class="junction"/>
+  <circle cx="1602" cy="820" r="5" class="junction"/>
+  <circle cx="1245" cy="820" r="5" class="junction"/>
+  <text x="760" y="810" class="label">GND · COMMON SIGNAL REFERENCE</text>
+  <text x="1365" y="841" class="small">
+    Positive supply rails remain separate; grounds join for UART/GPIO reference.
+  </text>
+
+  <!-- Pin schedule -->
+  <rect x="62" y="866" width="1070" height="214" fill="#fff"
+        stroke="#111" stroke-width="1.5"/>
+  <line x1="62" y1="900" x2="1132" y2="900" class="thin"/>
+  <line x1="420" y1="866" x2="420" y2="1080" class="thin"/>
+  <line x1="775" y1="866" x2="775" y2="1080" class="thin"/>
+  <text x="76" y="889" class="sheet">PIN / NET SCHEDULE</text>
+
+  <text x="76" y="928" class="mono-head">TB6612FNG CONTROL</text>
+  <text x="76" y="954" class="mono">PWMA  GPIO14    AIN1  GPIO18</text>
+  <text x="76" y="978" class="mono">AIN2  GPIO19    PWMB  GPIO27</text>
+  <text x="76" y="1002" class="mono">BIN1  GPIO16    BIN2  GPIO17</text>
+  <text x="76" y="1026" class="mono">STBY  GPIO32</text>
+  <text x="76" y="1058" class="small">VM = VBAT_2S · verify VCC logic jumper before power-on</text>
+
+  <text x="436" y="928" class="mono-head">SENSORS</text>
+  <text x="436" y="954" class="mono">ENC_L_A GPIO25  ENC_L_B GPIO26</text>
+  <text x="436" y="978" class="mono">ENC_R_A GPIO35  ENC_R_B GPIO33</text>
+  <text x="436" y="1002" class="mono">I2C_SDA GPIO21  I2C_SCL GPIO22</text>
+  <text x="436" y="1028" class="small">GPIO35 has no internal pull-up.</text>
+
+  <text x="791" y="928" class="mono-head">ODROID UART_EE_C ↔ ESP32 UART2</text>
+  <text x="791" y="954" class="mono">ODROID PIN32 TX → GPIO34 RX2</text>
+  <text x="791" y="978" class="mono">ODROID PIN26 RX ← GPIO23 TX2</text>
+  <text x="791" y="1002" class="mono">ODROID PIN06 GND ↔ ESP32 GND</text>
+  <text x="791" y="1028" class="small">GPIO1/GPIO3 remain reserved for USB flashing.</text>
+
+  <!-- Notes -->
+  <rect x="1150" y="866" width="565" height="214" fill="#fff"
+        stroke="#111" stroke-width="1.5"/>
+  <text x="1165" y="891" class="sheet">GENERAL NOTES</text>
+  <line x1="1150" y1="900" x2="1715" y2="900" class="thin"/>
+  <text x="1165" y="927" class="note">1. VERIFY POLARITY AND GROUND CONTINUITY BEFORE ENERGIZING.</text>
+  <text x="1165" y="950" class="note">2. NEVER APPLY THE 2S POSITIVE RAIL TO ODROID GPIO OR 5 V INPUT.</text>
+  <text x="1165" y="973" class="note">3. CONFIRM EXPANSION-CARRIER 3.3 V / 5 V JUMPER POSITION.</text>
+  <text x="1165" y="996" class="note">4. KEEP MOTOR CURRENT OUT OF ODROID AND LOGIC GROUND WIRING.</text>
+  <text x="1165" y="1019" class="note">5. * F1/S1 RATING AND INSTALLATION MUST BE VERIFIED ON THE ROBOT.</text>
+  <text x="1165" y="1042" class="note">6. ESP32 DEVKIT AND I/O EXPANSION CARRIER ARE BOTH 38-PIN.</text>
+  <text x="1165" y="1065" class="note">7. *** TB6612 VCC LOGIC VOLTAGE MUST MATCH THE CONTROLLER RAIL.</text>
+
+  <!-- Title block -->
+  <rect x="62" y="1094" width="1653" height="50" fill="#fff"
+        stroke="#111" stroke-width="1.5"/>
+  <line x1="1020" y1="1094" x2="1020" y2="1144" class="thin"/>
+  <line x1="1260" y1="1094" x2="1260" y2="1144" class="thin"/>
+  <line x1="1430" y1="1094" x2="1430" y2="1144" class="thin"/>
+  <line x1="1585" y1="1094" x2="1585" y2="1144" class="thin"/>
+  <text x="76" y="1114" class="small">PROJECT</text>
+  <text x="76" y="1135" class="ref">PHYSICAL INDOOR DELIVERY AMR</text>
+  <text x="1034" y="1114" class="small">DRAWING NO.</text>
+  <text x="1034" y="1135" class="ref">AMR-ELEC-001</text>
+  <text x="1274" y="1114" class="small">REVISION</text>
+  <text x="1274" y="1135" class="ref">DRAFT A</text>
+  <text x="1444" y="1114" class="small">DATE</text>
+  <text x="1444" y="1135" class="ref">2026-09-20</text>
+  <text x="1599" y="1114" class="small">SHEET</text>
+  <text x="1599" y="1135" class="ref">1 OF 1</text>
+</svg>

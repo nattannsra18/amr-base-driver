@@ -46,6 +46,9 @@ def bridge(*, pose_age=0.2, moving=False, uncertainty=0.1, mapping=False):
         localization_command_queue=Queue(),
         active_localization_command=None,
         active_command=None,
+        localization_lifecycle_client=SimpleNamespace(
+            service_is_ready=lambda: False,
+        ),
         emergency_stop_latched=threading.Event(),
         physical_estop_latched=threading.Event(),
         mapping_teleop_deadman_seconds=0.35,
@@ -64,6 +67,13 @@ def bridge(*, pose_age=0.2, moving=False, uncertainty=0.1, mapping=False):
         WebBridgeNode.finish_localization_command(
             value, command, accepted, detail
         )
+    )
+    value.publish_initial_pose_command = (
+        lambda command: WebBridgeNode.publish_initial_pose_command(value, command)
+    )
+    value.localization_resume_callback = (
+        lambda future, command:
+        WebBridgeNode.localization_resume_callback(value, future, command)
     )
     return value
 
@@ -118,6 +128,47 @@ def test_initial_pose_command_is_published_and_acknowledged():
     assert value.sent[-1]['command_action'] == 'SET_INITIAL_POSE'
     assert value.sent[-1]['accepted'] is True
     assert value.localization_recovery_count == 1
+    assert value.localization_recovery_active is True
+
+
+def test_amcl_state_callback_accepts_active_lifecycle_id():
+    value = bridge()
+    future = SimpleNamespace(result=lambda: SimpleNamespace(
+        current_state=SimpleNamespace(id=3, label='ACTIVE '),
+    ))
+    WebBridgeNode.amcl_state_callback(value, future)
+    assert value.amcl_state == 'ACTIVE'
+
+
+def test_inactive_amcl_is_resumed_before_initial_pose_is_published():
+    value = bridge()
+    value.amcl_state = 'INACTIVE'
+    published = []
+    callbacks = []
+    value.publish_initial_pose = lambda *args, **kwargs: published.append(
+        (args, kwargs)
+    )
+    future = SimpleNamespace(add_done_callback=callbacks.append)
+    value.localization_lifecycle_client = SimpleNamespace(
+        service_is_ready=lambda: True,
+        call_async=lambda request: future,
+    )
+    command = {
+        'action': 'SET_INITIAL_POSE',
+        'command_id': 'localization-set_initial_pose:test',
+        'pose': {'frame_id': 'map', 'x': 2.0, 'y': 3.0, 'yaw': 0.2},
+        'position_uncertainty': 0.4,
+        'yaw_uncertainty': 0.3,
+    }
+    value.localization_command_queue.put(command)
+    WebBridgeNode.process_localization_command_queue(value)
+    assert published == []
+    assert len(callbacks) == 1
+
+    callbacks[0](SimpleNamespace(result=lambda: SimpleNamespace(success=True)))
+    assert published
+    assert value.sent[-1]['accepted'] is True
+    assert value.localization_recovery_active is True
 
 
 def test_recovery_teleop_is_limited_and_deadman_stops_motion():

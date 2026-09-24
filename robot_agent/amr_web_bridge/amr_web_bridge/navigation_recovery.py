@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from typing import Any, Callable
 
@@ -25,6 +26,8 @@ COSTMAP_CLEAR_TIMEOUT_SECONDS = 15.0
 
 def classify_plan_failure(output: str) -> str:
     normalized = output.lower()
+    if 'timed out' in normalized or 'timeout' in normalized:
+        return 'Planner timeout'
     if any(value in normalized for value in (
         'start occupied', 'start is occupied', 'start pose is invalid',
         'start_outside_map', 'start occupied by obstacle',
@@ -70,7 +73,9 @@ class NavigationRecoveryRunner:
 
     def lifecycle_active(self, node: str) -> tuple[bool, str]:
         ok, output = self._command(['ros2', 'lifecycle', 'get', node], timeout=4.0)
-        return ok and 'active' in output.lower(), output
+        # "inactive" must never satisfy the active-state gate.
+        active = re.search(r'^\s*active\s*\[3\]\s*$', output, re.MULTILINE)
+        return ok and active is not None, output
 
     def nav2_lifecycle_healthy(self) -> tuple[bool, str]:
         details = []

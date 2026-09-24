@@ -4,6 +4,8 @@ from queue import Queue
 import threading
 from types import SimpleNamespace
 
+from action_msgs.msg import GoalStatus
+
 from amr_web_bridge.web_bridge_node import WebBridgeNode
 
 
@@ -97,3 +99,84 @@ def test_preview_goal_uses_compute_path_and_never_navigate_to_pose():
     source = inspect.getsource(WebBridgeNode.build_preview_goal)
     assert 'ComputePathToPose.Goal' in source
     assert 'NavigateToPose' not in source
+
+
+def test_recovery_reuses_native_compute_path_action_client():
+    source = inspect.getsource(WebBridgeNode.compute_recovery_path)
+    assert 'recovery_plan_client.send_goal_async' in source
+    assert 'subprocess' not in source
+    assert "['ros2'" not in source
+
+
+def test_blocked_pose_recovery_does_not_launch_compute_path_cli():
+    source = inspect.getsource(WebBridgeNode.run_blocked_pose_recovery)
+    assert 'compute_recovery_path' in source
+    assert 'navigation_recovery_runner.compute_path' not in source
+
+
+class ImmediateFuture:
+    def __init__(self, value):
+        self.value = value
+
+    def result(self):
+        return self.value
+
+    def add_done_callback(self, callback):
+        callback(self)
+
+
+class AcceptedRecoveryGoal:
+    accepted = True
+
+    def get_result_async(self):
+        return ImmediateFuture(SimpleNamespace(
+            status=GoalStatus.STATUS_SUCCEEDED,
+            result=SimpleNamespace(
+                error_code=0,
+                error_msg='',
+                path=SimpleNamespace(poses=[object(), object()]),
+            ),
+        ))
+
+
+class RecoveryPlanClient:
+    def wait_for_server(self, timeout_sec):
+        return timeout_sec == 1.0
+
+    def send_goal_async(self, _goal):
+        return ImmediateFuture(AcceptedRecoveryGoal())
+
+
+def test_native_recovery_plan_reports_connected_path():
+    node = SimpleNamespace(recovery_plan_client=RecoveryPlanClient())
+    node.build_recovery_plan_goal = lambda _target: object()
+
+    planned, detail = WebBridgeNode.compute_recovery_path(
+        node,
+        {'frame_id': 'map', 'x': 1.0, 'y': 2.0, 'yaw': 0.0},
+    )
+
+    assert planned is True
+    assert detail == 'Nav2 computed a connected path with 2 poses'
+
+
+def test_native_recovery_plan_has_bounded_timeout():
+    class PendingFuture:
+        def add_done_callback(self, _callback):
+            return None
+
+    class PendingRecoveryPlanClient(RecoveryPlanClient):
+        def send_goal_async(self, _goal):
+            return PendingFuture()
+
+    node = SimpleNamespace(recovery_plan_client=PendingRecoveryPlanClient())
+    node.build_recovery_plan_goal = lambda _target: object()
+
+    planned, detail = WebBridgeNode.compute_recovery_path(
+        node,
+        {'frame_id': 'map', 'x': 1.0, 'y': 2.0, 'yaw': 0.0},
+        timeout_seconds=0.01,
+    )
+
+    assert planned is False
+    assert detail.startswith('Planner timeout:')

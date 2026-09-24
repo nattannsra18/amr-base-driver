@@ -15,7 +15,7 @@ def test_systemd_service_starts_agent_from_external_profile_and_env():
     assert 'source "$ROBOT_WORKSPACE/setup.bash"' in service
     assert '--params-file "$ROBOT_PROFILE_FILE"' in service
     assert 'Restart=always' in service
-    assert 'NoNewPrivileges=true' in service
+    assert 'NoNewPrivileges=false' in service
     assert 'ReadWritePaths=/var/lib/indoor-delivery-robot' in service
 
 
@@ -43,3 +43,9 @@ def test_installer_supports_secure_repeatable_deployment():
     assert 'Robot Registry:' in installer
     assert 'Robot pairing required. Code:' in installer
     assert 'REPLACE-|CHANGE-ME|CHANGEME' in installer
+    assert '/etc/sudoers.d/indoor-delivery-robot-agent' in installer
+    assert 'indoor-delivery-robot-control start-navigation' in installer
+    assert 'indoor-delivery-robot-control restart-navigation' in installer
+    assert 'indoor-delivery-robot-control stop-navigation' in installer
+    assert 'indoor-delivery-robot-control poweroff' in installer
+    assert 'systemctl *' not in installer

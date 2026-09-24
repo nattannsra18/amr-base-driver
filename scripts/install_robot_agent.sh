@@ -67,6 +67,7 @@ done
 [[ -f "$PACKAGE_ROOT/package.xml" ]] || fail "Vendored amr_web_bridge package was not found"
 command -v colcon >/dev/null || fail "colcon is required"
 command -v systemctl >/dev/null || fail "systemctl is required"
+command -v visudo >/dev/null || fail "visudo is required"
 command -v setfacl >/dev/null || fail "setfacl is required (install the acl package)"
 if ! bash -c "source '/opt/ros/$ROS_DISTRO_NAME/setup.bash' && python3 -c 'import websockets, yaml'"; then
   fail "Python packages websockets and yaml are required by the Agent"
@@ -152,6 +153,14 @@ ENVIRONMENT_TMP="$BUILD_DIR/agent.env"
 chmod 0600 "$ENVIRONMENT_TMP"
 run install -o root -g "$SERVICE_USER" -m 0640 "$ENVIRONMENT_TMP" "$CONFIG_DIR/agent.env"
 run install -o root -g root -m 0644 "$PACKAGE_ROOT/deploy/systemd/$SERVICE_NAME" "/etc/systemd/system/$SERVICE_NAME"
+run install -o root -g root -m 0755 \
+  "$REPOSITORY_ROOT/scripts/indoor-delivery-robot-control" \
+  /usr/local/sbin/indoor-delivery-robot-control
+SUDOERS_TMP="$BUILD_DIR/indoor-delivery-robot-agent"
+printf '%s ALL=(root) NOPASSWD: /usr/local/sbin/indoor-delivery-robot-control start-navigation, /usr/local/sbin/indoor-delivery-robot-control restart-navigation, /usr/local/sbin/indoor-delivery-robot-control stop-navigation, /usr/local/sbin/indoor-delivery-robot-control poweroff\n' "$SERVICE_USER" > "$SUDOERS_TMP"
+chmod 0440 "$SUDOERS_TMP"
+run visudo -cf "$SUDOERS_TMP"
+run install -o root -g root -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/indoor-delivery-robot-agent
 run systemctl daemon-reload
 run systemctl enable "$SERVICE_NAME"
 if "$NO_START"; then info "Installed without starting the service (--no-start)"; else run systemctl restart "$SERVICE_NAME"; fi
