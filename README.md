@@ -149,6 +149,23 @@ sudo ./scripts/install_navigation_service.sh \
   --enable-motors
 ```
 
+### Private live camera stream
+
+The dashboard camera uses the webcam's hardware MJPEG output directly, without
+publishing video frames over ROS 2 or DDS. Install the lightweight boot service
+on the ODROID after connecting the USB camera:
+
+```bash
+sudo apt-get install ustreamer
+sudo ./scripts/install_camera_stream.sh --host "$(tailscale ip -4)"
+```
+
+The service captures 640x480 at 30 fps and listens only on the robot's private
+Tailscale address. The web proxy samples the latest frame instead of forwarding
+a growing MJPEG queue, preventing stale frames from accumulating on weak Wi-Fi.
+Configure the web server with
+`CAMERA_STREAM_URL=http://<tailscale-ip>:8081/stream`.
+
 Optionally include `--map-yaml` during installation to set the first active
 map. Otherwise select a map in Map Management; the Agent saves it and starts
 the localization stack. Nav2 deliberately waits for an operator-confirmed

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Install a low-overhead MJPEG camera stream outside the ROS 2/DDS data path.
+set -Eeuo pipefail
+
+readonly SERVICE_NAME="indoor-delivery-robot-camera.service"
+readonly CONFIG_DIR="/etc/indoor-delivery-robot"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+CAMERA_DEVICE="/dev/v4l/by-id/usb-Generic_USB_Camera_200901010001-video-index0"
+CAMERA_HOST="100.67.28.7"
+CAMERA_PORT="8081"
+DRY_RUN=false
+NO_START=false
+
+usage() {
+  cat <<'EOF'
+Install the low-latency 640x480 MJPEG camera service.
+
+Usage:
+  sudo ./scripts/install_camera_stream.sh \
+    [--device /dev/v4l/by-id/...-video-index0] \
+    [--host 100.67.28.7] [--port 8081] [--no-start] [--dry-run]
+
+The host must already be assigned to this computer. Bind to a private
+Tailscale address so the raw camera port is not exposed to the LAN.
+EOF
+}
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+run() {
+  if "$DRY_RUN"; then
+    printf '[dry-run]'; printf ' %q' "$@"; printf '\n'
+  else
+    "$@"
+  fi
+}
+
+while (($#)); do
+  case "$1" in
+    --device) (($# >= 2)) || fail "--device requires a path"; CAMERA_DEVICE="$2"; shift 2 ;;
+    --host) (($# >= 2)) || fail "--host requires an address"; CAMERA_HOST="$2"; shift 2 ;;
+    --port) (($# >= 2)) || fail "--port requires a number"; CAMERA_PORT="$2"; shift 2 ;;
+    --dry-run) DRY_RUN=true; shift ;;
+    --no-start) NO_START=true; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "Unknown option: $1" ;;
+  esac
+done
+
+[[ "$CAMERA_DEVICE" == /dev/* ]] || fail "Camera device must be under /dev"
+[[ "$CAMERA_HOST" =~ ^[0-9a-fA-F:.]+$ ]] || fail "Camera host must be an IP address"
+[[ "$CAMERA_PORT" =~ ^[0-9]+$ ]] && ((CAMERA_PORT >= 1 && CAMERA_PORT <= 65535)) || fail "Invalid camera port"
+[[ -x /usr/bin/ustreamer || "$DRY_RUN" == true ]] || fail "Install ustreamer first: sudo apt-get install ustreamer"
+[[ -e "$CAMERA_DEVICE" || "$DRY_RUN" == true ]] || fail "Camera capture device not found: $CAMERA_DEVICE"
+[[ -f "$REPOSITORY_ROOT/deploy/systemd/$SERVICE_NAME" ]] || fail "Service template was not found"
+[[ "$EUID" -eq 0 || "$DRY_RUN" == true ]] || fail "Run this installer with sudo, or use --dry-run"
+
+if ! "$DRY_RUN" && ! ip -brief address show | grep -Fq "$CAMERA_HOST"; then
+  fail "Camera host is not assigned to this computer: $CAMERA_HOST"
+fi
+
+ENV_FILE="$(mktemp)"
+cleanup() { rm -f -- "$ENV_FILE"; }
+trap cleanup EXIT
+{
+  printf 'CAMERA_DEVICE=%s\n' "$CAMERA_DEVICE"
+  printf 'CAMERA_HOST=%s\n' "$CAMERA_HOST"
+  printf 'CAMERA_PORT=%s\n' "$CAMERA_PORT"
+} > "$ENV_FILE"
+
+run install -d -m 0755 "$CONFIG_DIR"
+run install -o root -g root -m 0644 "$ENV_FILE" "$CONFIG_DIR/camera.env"
+run install -o root -g root -m 0644 "$REPOSITORY_ROOT/deploy/systemd/$SERVICE_NAME" "/etc/systemd/system/$SERVICE_NAME"
+run systemctl daemon-reload
+run systemctl enable "$SERVICE_NAME"
+if "$NO_START"; then
+  printf 'Camera stream installed without starting it.\n'
+else
+  run systemctl restart "$SERVICE_NAME"
+  printf 'Camera stream: http://%s:%s/stream\n' "$CAMERA_HOST" "$CAMERA_PORT"
+fi
