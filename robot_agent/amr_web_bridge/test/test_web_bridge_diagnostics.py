@@ -231,6 +231,31 @@ def test_motor_fault_snapshot_reads_esp32_stall_state():
     }
 
 
+def test_motor_fault_snapshot_merges_separate_fault_sources():
+    bridge = make_bridge()
+    message = DiagnosticArray()
+    mcu = diagnostics_message('ESP32 MCU fault', 'esp32-uart-c').status[0]
+    mcu.values = [KeyValue(key='mcu_fault', value='0')]
+    host = diagnostics_message(
+        'Host wheel feedback', 'odroid-motion-guard').status[0]
+    host.values = [
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='PRE_STALL'),
+        KeyValue(key='host_motion_reason', value='LEFT_NO_WHEEL_FEEDBACK'),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    message.status = [mcu, host]
+    bridge.diagnostics_callback(message)
+
+    assert bridge.motor_fault_snapshot() == {
+        'mcu_fault': 0,
+        'host_motion_fault': '',
+        'host_motion_state': 'PRE_STALL',
+        'host_motion_reason': 'LEFT_NO_WHEEL_FEEDBACK',
+        'motors_enabled': True,
+    }
+
+
 def test_pre_stall_is_resettable_before_fault_latch():
     bridge = make_bridge()
     message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
@@ -821,7 +846,7 @@ def test_pre_stall_guard_refusal_tries_scan_safe_arc_in_same_window():
     assert results == []
 
 
-def test_pre_stall_without_active_goal_latches_without_moving():
+def test_pre_stall_without_active_goal_is_blocked_without_moving():
     bridge = make_bridge()
     bridge.velocity_lock = threading.Lock()
     bridge.latest_velocity = {
@@ -858,12 +883,16 @@ def test_pre_stall_without_active_goal_latches_without_moving():
             raise AssertionError('the robot must not move without an active goal')
 
     bridge.navigation_recovery_runner = Runner()
+    bridge.block_motor_recovery_for_safety = lambda: (
+        calls.append('block') or (True, 'RECOVERY_BLOCKED')
+    )
 
     succeeded, detail = bridge.reset_motor_stall()
 
     assert succeeded is False
-    assert calls == ['clear', ('finish', False)]
-    assert 'latched without moving the robot' in detail
+    assert calls == ['clear', 'block']
+    assert detail.startswith('RECOVERY_BLOCKED:')
+    assert 'no motor fault was asserted' in detail
 
 
 def test_reset_motor_stall_keeps_fault_latched_without_safe_escape():

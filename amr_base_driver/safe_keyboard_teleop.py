@@ -99,7 +99,7 @@ class SafeKeyboardTeleop(Node):
         self.key_timeout = float(self.get_parameter('key_timeout').value)
         self.publish_rate = float(
             self.get_parameter('publish_rate').value)
-        self.publisher = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.publisher = self.create_publisher(Twist, '/cmd_vel_manual', 10)
         self.dashboard_reset = self.create_client(
             Empty, '/reset_dashboard_distance')
         self.linear = 0.0

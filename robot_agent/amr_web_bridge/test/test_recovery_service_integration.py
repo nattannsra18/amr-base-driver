@@ -91,6 +91,20 @@ def test_guarded_reverse_uses_warm_service_client():
     assert calls == ['reverse']
 
 
+def test_safety_block_uses_distinct_warm_service_client():
+    calls = []
+    response = SimpleNamespace(success=True, message='RECOVERY_BLOCKED')
+    value = SimpleNamespace(
+        block_motor_recovery_client=client(response, calls, 'blocked'),
+    )
+
+    ok, detail = WebBridgeNode.block_motor_recovery_for_safety(value)
+
+    assert ok
+    assert detail == 'RECOVERY_BLOCKED'
+    assert calls == ['blocked']
+
+
 def test_guarded_arc_uses_direction_specific_warm_service_client():
     calls = []
     response = SimpleNamespace(success=True, message='arc complete')

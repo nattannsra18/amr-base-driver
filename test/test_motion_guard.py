@@ -45,14 +45,17 @@ def test_successful_feedback_rearms_a_future_pre_stall():
     assert guard.state == 'PRE_STALL'
 
 
-def test_failed_escape_latches_original_reason():
+def test_failed_escape_is_not_misreported_as_wheel_fault():
     guard = MotionGuard()
     guard.command(0.0, [15.0, 15.0])
     guard.sample(0.86, [0.0, 15.0])
     guard.sample(1.32, [0.0, 15.0])
     assert guard.begin_recovery(1.33)
     assert guard.finish_recovery(False)
-    assert guard.fault == 'LEFT_NO_WHEEL_FEEDBACK'
+    assert not guard.fault
+    assert guard.recovery_failed == 'LEFT_NO_WHEEL_FEEDBACK'
+    assert guard.state == 'RECOVERY_FAILED'
+    assert guard.blocks_motion
 
 
 def test_failed_escape_preserves_a_fresh_opposite_wheel_fault():
@@ -77,7 +80,22 @@ def test_recovery_orchestrator_failure_can_latch_pre_stall_directly():
     guard.sample(0.86, [15.0, 0.0])
     guard.sample(1.32, [15.0, 0.0])
     assert guard.finish_recovery(False)
-    assert guard.fault == 'RIGHT_NO_WHEEL_FEEDBACK'
+    assert not guard.fault
+    assert guard.recovery_failed == 'RIGHT_NO_WHEEL_FEEDBACK'
+
+
+def test_safety_block_is_distinct_from_motion_failure():
+    guard = MotionGuard()
+    guard.command(0.0, [15.0, 15.0])
+    guard.sample(0.86, [15.0, 0.0])
+    guard.sample(1.32, [15.0, 0.0])
+
+    assert guard.block_recovery()
+    assert guard.state == 'RECOVERY_BLOCKED'
+    assert guard.recovery_blocked == 'RIGHT_NO_WHEEL_FEEDBACK'
+    assert not guard.recovery_failed
+    assert not guard.fault
+    assert guard.blocks_motion
 
 
 def test_reversal_and_low_targets_do_not_false_trip():

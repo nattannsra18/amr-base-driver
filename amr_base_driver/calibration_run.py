@@ -6,7 +6,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, JointState
 from std_srvs.srv import Empty
 
 
@@ -27,11 +27,16 @@ class CalibrationRun(Node):
     def __init__(self):
         super().__init__('amr_calibration_run')
         self.declare_parameter('mode', 'straight')
-        self.declare_parameter('target_distance', 2.0)
-        self.declare_parameter('target_angle', 2.0 * math.pi)
+        # Calibration is a guarded sign check, not a long autonomous drive.
+        # Keep defaults deliberately short so a misspelled ROS parameter
+        # cannot turn a bench/HIL check into metres of unexpected motion.
+        self.declare_parameter('target_distance', 0.12)
+        self.declare_parameter('target_angle', 0.20)
         self.declare_parameter('linear_speed', 0.12)
         self.declare_parameter('angular_speed', 0.35)
-        self.declare_parameter('max_duration', 30.0)
+        self.declare_parameter('arc_linear_speed', 0.05)
+        self.declare_parameter('arc_angular_speed', 0.28)
+        self.declare_parameter('max_duration', 8.0)
         self.declare_parameter('distance_stop_margin', 0.0)
         self.declare_parameter('angle_stop_margin', 0.0)
         self.mode = str(self.get_parameter('mode').value)
@@ -42,6 +47,10 @@ class CalibrationRun(Node):
             self.get_parameter('linear_speed').value)
         self.angular_speed = float(
             self.get_parameter('angular_speed').value)
+        self.arc_linear_speed = float(
+            self.get_parameter('arc_linear_speed').value)
+        self.arc_angular_speed = float(
+            self.get_parameter('arc_angular_speed').value)
         self.max_duration = float(
             self.get_parameter('max_duration').value)
         self.distance_stop_margin = float(
@@ -49,10 +58,13 @@ class CalibrationRun(Node):
         self.angle_stop_margin = float(
             self.get_parameter('angle_stop_margin').value)
 
-        self.command_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.command_pub = self.create_publisher(
+            Twist, '/cmd_vel_manual', 10)
         self.create_subscription(
             Odometry, '/wheel/odometry', self.on_odom, 20)
         self.create_subscription(Imu, '/imu/data_raw', self.on_imu, 20)
+        self.create_subscription(
+            JointState, '/joint_states', self.on_joint_state, 20)
         self.create_subscription(
             DiagnosticArray, '/diagnostics', self.on_diagnostic, 10)
         self.reset_client = self.create_client(
@@ -64,6 +76,7 @@ class CalibrationRun(Node):
         self.imu_collecting = False
         self.last_imu_time = None
         self.fault = None
+        self.joint_positions = None
         self.motors_enabled = False
         self.diagnostic_time = 0.0
 
@@ -79,17 +92,32 @@ class CalibrationRun(Node):
         self.last_imu_time = now
         self.imu = message
 
+    def on_joint_state(self, message):
+        positions = dict(zip(message.name, message.position))
+        try:
+            self.joint_positions = (
+                float(positions['left_wheel_joint']),
+                float(positions['right_wheel_joint']),
+            )
+        except (KeyError, TypeError, ValueError):
+            return
+
     def on_diagnostic(self, message):
         for status in message.status:
-            if status.name != 'ESP32 base controller':
+            if status.name not in {
+                'ESP32 base controller',
+                'ESP32 MCU fault',
+                'Host wheel feedback',
+            }:
                 continue
             values = {item.key: item.value for item in status.values}
-            try:
-                self.fault = int(values.get('mcu_fault', '-1'))
-            except ValueError:
-                self.fault = -1
-            self.motors_enabled = (
-                values.get('motors_enabled', 'False') == 'True')
+            if 'mcu_fault' in values:
+                try:
+                    self.fault = int(values['mcu_fault'])
+                except ValueError:
+                    self.fault = -1
+            if 'motors_enabled' in values:
+                self.motors_enabled = values['motors_enabled'] == 'True'
             self.diagnostic_time = time.monotonic()
 
     def publish_command(self, linear=0.0, angular=0.0):
@@ -115,13 +143,15 @@ class CalibrationRun(Node):
                 now - self.diagnostic_time
                 if self.diagnostic_time else float('inf'))
             diagnostic_fresh = diagnostic_age < 2.0
-            if (self.odom is not None and diagnostic_fresh and
+            if (self.odom is not None and self.joint_positions is not None
+                    and diagnostic_fresh and
                     self.fault == 0 and self.motors_enabled):
                 return True
             if now - last_report >= 1.0:
                 print(
                     'READY_WAIT '
                     f'odom={self.odom is not None} '
+                    f'joints={self.joint_positions is not None} '
                     f'diagnostic_age={diagnostic_age:.2f}s '
                     f'mcu_fault={self.fault} '
                     f'motors_enabled={self.motors_enabled}',
@@ -146,7 +176,10 @@ class CalibrationRun(Node):
         return diagnostic_fresh and self.fault == 0 and self.motors_enabled
 
     def run(self):
-        if self.mode not in ('straight', 'turn_left', 'turn_right'):
+        if self.mode not in (
+            'straight', 'reverse', 'turn_left', 'turn_right',
+            'arc_left', 'arc_right',
+        ):
             print(f'ABORT invalid mode: {self.mode}', flush=True)
             return 2
         print('Waiting for fresh odometry and healthy ESP32 diagnostics...',
@@ -176,6 +209,7 @@ class CalibrationRun(Node):
         self.imu_angle = 0.0
         self.last_imu_time = start
         self.imu_collecting = True
+        start_joints = self.joint_positions
         reason = 'timeout'
 
         while rclpy.ok() and time.monotonic() - start < self.max_duration:
@@ -201,10 +235,21 @@ class CalibrationRun(Node):
             last_yaw = current_yaw
 
             now = time.monotonic()
-            if self.mode == 'straight':
-                self.publish_command(linear=self.linear_speed)
+            if self.mode in {'straight', 'reverse'}:
+                direction = 1.0 if self.mode == 'straight' else -1.0
+                self.publish_command(linear=direction * abs(self.linear_speed))
                 if distance >= max(
                         self.target_distance - self.distance_stop_margin, 0.0):
+                    reason = 'target reached'
+                    break
+            elif self.mode in {'arc_left', 'arc_right'}:
+                direction = 1.0 if self.mode == 'arc_left' else -1.0
+                self.publish_command(
+                    linear=-abs(self.arc_linear_speed),
+                    angular=direction * abs(self.arc_angular_speed),
+                )
+                if abs(wheel_angle) >= max(
+                        self.target_angle - self.angle_stop_margin, 0.0):
                     reason = 'target reached'
                     break
             else:
@@ -230,14 +275,42 @@ class CalibrationRun(Node):
         coast_end = time.monotonic() + 1.0
         while rclpy.ok() and time.monotonic() < coast_end:
             rclpy.spin_once(self, timeout_sec=0.05)
+        left_delta = self.joint_positions[0] - start_joints[0]
+        right_delta = self.joint_positions[1] - start_joints[1]
+        signs_ok = self.wheel_signs_match(left_delta, right_delta)
         print(
             f'RESULT mode={self.mode} reason={reason} '
             f'distance={distance:.4f}m '
             f'wheel_angle={math.degrees(wheel_angle):+.2f}deg '
             f'imu_angle={math.degrees(self.imu_angle):+.2f}deg '
+            f'left_delta={left_delta:+.4f}rad '
+            f'right_delta={right_delta:+.4f}rad signs_ok={signs_ok} '
             f'elapsed={time.monotonic() - start:.2f}s fault={self.fault}',
             flush=True)
-        return 0 if reason == 'target reached' else 5
+        if reason != 'target reached':
+            return 5
+        return 0 if signs_ok else 6
+
+    def wheel_signs_match(self, left_delta, right_delta):
+        """Verify encoder direction before any stall tolerance is changed."""
+        threshold = 0.05
+        if self.mode == 'straight':
+            return left_delta > threshold and right_delta > threshold
+        if self.mode == 'reverse':
+            return left_delta < -threshold and right_delta < -threshold
+        if self.mode == 'arc_left':
+            return (
+                left_delta < -threshold
+                and left_delta < right_delta
+            )
+        if self.mode == 'arc_right':
+            return (
+                right_delta < -threshold
+                and right_delta < left_delta
+            )
+        if self.mode == 'turn_left':
+            return left_delta < -threshold and right_delta > threshold
+        return left_delta > threshold and right_delta < -threshold
 
 
 def main(args=None):

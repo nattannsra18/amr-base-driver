@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -12,14 +12,12 @@ def generate_launch_description():
     base_share = get_package_share_directory('amr_base_driver')
     slam_share = get_package_share_directory('slam_toolbox')
     enable_motors = LaunchConfiguration('enable_motors')
-    enable_drive_supervisor = LaunchConfiguration('enable_drive_supervisor')
 
     base_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(base_share, 'launch', 'base_hardware.launch.py')),
         launch_arguments={
             'enable_motors': enable_motors,
-            'enable_drive_supervisor': enable_drive_supervisor,
             'publish_sensor_tf': 'true',
         }.items(),
     )
@@ -40,6 +38,7 @@ def generate_launch_description():
         parameters=[{
             'input_topic': '/scan_raw',
             'output_topic': '/scan',
+            'telemetry_hz': 2.0,
             'output_beams': 360,
         }],
     )
@@ -57,19 +56,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_motors', default_value='false',
             description='Unlock cmd_vel only during an attended floor test.'),
-        DeclareLaunchArgument(
-            'enable_drive_supervisor', default_value='false',
-            description=(
-                'DEPRECATED/EXPERIMENTAL caster supervisor. Mapping uses '
-                'cmd_vel_passthrough by default.')),
         base_launch,
-        # Bring up the base TF/odometry chain before scans, then start SLAM
-        # only after the laser has begun publishing.  This prevents the
-        # one-time message-filter queue overflow seen during simultaneous
-        # startup on the ODROID-C4.
-        TimerAction(period=3.0, actions=[lidar, scan_resampler]),
-        # Leave a full TF/odometry history window before slam_toolbox starts.
-        # Starting at six seconds still raced the first resampled scan against
-        # the newest odom transform on the C4 and discarded one startup frame.
-        TimerAction(period=8.0, actions=[slam]),
+        # Subscribers can start before their publishers.  Avoid fixed sleeps:
+        # slam_toolbox will begin updating when scan and TF are both ready.
+        lidar,
+        scan_resampler,
+        slam,
     ])

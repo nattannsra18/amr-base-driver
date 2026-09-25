@@ -17,6 +17,12 @@ def load_nav2_params():
     return yaml.safe_load(params_path.read_text(encoding='utf-8'))
 
 
+def test_ekf_rate_is_bounded_for_odroid_sensor_cadence():
+    params_path = PACKAGE_ROOT / 'config' / 'ekf.yaml'
+    params = yaml.safe_load(params_path.read_text(encoding='utf-8'))
+    assert params['ekf_filter_node']['ros__parameters']['frequency'] == 15.0
+
+
 def test_local_and_global_costmaps_use_measured_footprint():
     params = load_nav2_params()
     for name in ('local_costmap', 'global_costmap'):
@@ -117,6 +123,23 @@ def test_navigation_launch_starts_and_manages_behavior_server():
     assert "'behavior_server'," in launch
 
 
+def test_localization_waits_for_lifecycle_bonds_under_startup_load():
+    launch = (PACKAGE_ROOT / 'launch' / 'localization.launch.py').read_text(
+        encoding='utf-8')
+    assert "'bond_timeout': 10.0" in launch
+    assert "'autostart': False" in launch
+    assert "executable='localization_readiness_gate'" in launch
+
+
+def test_navigation_processes_wait_for_localization_readiness():
+    launch = (PACKAGE_ROOT / 'launch' / 'navigation.launch.py').read_text(
+        encoding='utf-8')
+    assert 'OnProcessExit(' in launch
+    assert 'target_action=localization_ready' in launch
+    assert 'on_exit=[navigation_processes]' in launch
+    assert "'request_startup': False" in launch
+
+
 def test_navigation_activation_condition_quotes_launch_values():
     launch = (PACKAGE_ROOT / 'launch' / 'navigation.launch.py').read_text(
         encoding='utf-8')
@@ -143,4 +166,38 @@ def test_navigation_applies_tf_offset_without_changing_mapping_default():
     assert "'ekf_transform_time_offset', default_value='0.10'" in localization
     assert "'ekf_transform_time_offset': ekf_transform_time_offset" in localization
     assert "'ekf_transform_time_offset', default_value='0.0'" in base_hardware
-    assert "ParameterValue(" in base_hardware
+    assert 'ParameterValue(' in base_hardware
+
+
+def test_supported_launch_path_has_one_command_arbiter_and_no_fixed_delays():
+    base_hardware = (
+        PACKAGE_ROOT / 'launch' / 'base_hardware.launch.py'
+    ).read_text(encoding='utf-8')
+    localization = (
+        PACKAGE_ROOT / 'launch' / 'localization.launch.py'
+    ).read_text(encoding='utf-8')
+    mapping = (
+        PACKAGE_ROOT / 'launch' / 'mapping.launch.py'
+    ).read_text(encoding='utf-8')
+
+    assert "executable='cmd_vel_passthrough'" in base_hardware
+    assert "executable='drive_supervisor'" not in base_hardware
+    assert 'enable_drive_supervisor' not in base_hardware
+    assert 'TimerAction' not in localization
+    assert 'TimerAction' not in mapping
+
+
+def test_low_rate_observability_streams_reduce_odroid_dds_load():
+    base_hardware = (
+        PACKAGE_ROOT / 'launch' / 'base_hardware.launch.py'
+    ).read_text(encoding='utf-8')
+    localization = (
+        PACKAGE_ROOT / 'launch' / 'localization.launch.py'
+    ).read_text(encoding='utf-8')
+    mapping = (
+        PACKAGE_ROOT / 'launch' / 'mapping.launch.py'
+    ).read_text(encoding='utf-8')
+
+    assert "parameters=[{'max_topic_hz': 2.0}]" in base_hardware
+    assert "'telemetry_hz': 2.0" in localization
+    assert "'telemetry_hz': 2.0" in mapping

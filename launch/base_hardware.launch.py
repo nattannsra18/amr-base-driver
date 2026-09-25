@@ -4,7 +4,6 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
-from launch.conditions import UnlessCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -13,7 +12,6 @@ from launch_ros.parameter_descriptions import ParameterValue
 def generate_launch_description():
     share = get_package_share_directory('amr_base_driver')
     enable_motors = LaunchConfiguration('enable_motors')
-    enable_drive_supervisor = LaunchConfiguration('enable_drive_supervisor')
     publish_sensor_tf = LaunchConfiguration('publish_sensor_tf')
     ekf_transform_time_offset = LaunchConfiguration(
         'ekf_transform_time_offset')
@@ -21,12 +19,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_motors', default_value='false',
             description='Allow cmd_vel to drive motors. Keep false until floor test.'),
-        DeclareLaunchArgument(
-            'enable_drive_supervisor', default_value='false',
-            description=(
-                'DEPRECATED/EXPERIMENTAL caster supervisor. The supported '
-                'default path uses cmd_vel_passthrough. Enable only for an '
-                'explicit, attended regression test.')),
         DeclareLaunchArgument(
             'publish_sensor_tf', default_value='true',
             description='Publish measured base, IMU, and LiDAR static transforms.'),
@@ -37,26 +29,16 @@ def generate_launch_description():
                 'localization may override this to cover measured TF latency.')),
         Node(
             package='amr_base_driver',
-            executable='drive_supervisor',
-            name='drive_supervisor',
-            output='screen',
-            parameters=[os.path.join(
-                share, 'config', 'drive_supervisor.yaml')],
-            condition=IfCondition(enable_drive_supervisor),
-        ),
-        Node(
-            package='amr_base_driver',
             executable='cmd_vel_passthrough',
             name='cmd_vel_passthrough',
             output='screen',
-            condition=UnlessCondition(enable_drive_supervisor),
         ),
         Node(
             package='amr_base_driver',
             executable='guarded_reverse',
             name='guarded_reverse',
             output='screen',
-            condition=UnlessCondition(enable_drive_supervisor),
+            parameters=[{'scan_topic': '/scan_recovery'}],
         ),
         Node(
             package='amr_base_driver',
@@ -86,6 +68,15 @@ def generate_launch_description():
             executable='imu_conditioner',
             name='imu_conditioner',
             output='screen',
+        ),
+        Node(
+            package='amr_base_driver',
+            executable='black_box_recorder',
+            name='black_box_recorder',
+            output='screen',
+            parameters=[{'max_topic_hz': 2.0}],
+            respawn=True,
+            respawn_delay=2.0,
         ),
         Node(
             package='tf2_ros',

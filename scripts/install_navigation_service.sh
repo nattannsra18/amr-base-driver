@@ -61,6 +61,7 @@ done
 [[ "$EUID" -eq 0 || "$DRY_RUN" == true ]] || fail "Run this installer with sudo, or use --dry-run"
 
 WORKSPACE="$(readlink -f -- "$WORKSPACE")"
+SOURCE_COMMIT="$(git -C "$REPOSITORY_ROOT" rev-parse --verify HEAD 2>/dev/null || printf 'unknown')"
 if [[ -n "$MAP_FILE" ]]; then
   MAP_FILE="$(readlink -f -- "$MAP_FILE")"
 fi
@@ -73,10 +74,13 @@ trap cleanup EXIT
   printf 'AMR_WORKSPACE=%s\n' "$WORKSPACE"
   printf 'AMR_ACTIVE_MAP_LINK=%s/maps/.active-map.yaml\n' "$WORKSPACE"
   printf 'AMR_ENABLE_MOTORS=%s\n' "$ENABLE_MOTORS"
+  printf 'AMR_SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
   # Keep every robot-side ROS process on the same transport. The Agent runs as
   # a separate service account, so UDP avoids Fast DDS shared-memory permission
   # boundaries while preserving lifecycle service discovery.
-  printf 'ROS_DOMAIN_ID=0\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\n'
+  # Every ROS participant for this prototype runs on the ODROID. Keep DDS on
+  # loopback; the Robot Agent's WebSocket remains network-accessible.
+  printf 'ROS_DOMAIN_ID=0\nROS_LOCALHOST_ONLY=1\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\n'
 } > "$ENV_FILE"
 
 info "Installing the navigation boot service"

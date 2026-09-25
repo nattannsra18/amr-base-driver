@@ -26,7 +26,7 @@ class ImuConditioner(Node):
         self.diag = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
         self.create_subscription(Imu, '/imu/data_raw', self.on_imu, 20)
         self.create_subscription(Odometry, '/wheel/odometry', self.on_odom, 20)
-        self.create_subscription(Twist, '/cmd_vel', self.on_cmd, 10)
+        self.create_subscription(Twist, '/cmd_vel_safe', self.on_cmd, 10)
         self.create_timer(1.0, self.diagnostics)
 
     def now(self):

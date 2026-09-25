@@ -168,7 +168,7 @@ def swept_arc_obstacle_distance(
     range_max,
     turn_direction,
     arc_speed=0.05,
-    arc_turn_rate=0.18,
+    arc_turn_rate=0.28,
     arc_yaw=0.22,
 ):
     """
@@ -254,6 +254,11 @@ def measured_arc_progress(start_pose, current_pose, turn_direction):
     return travelled, directed_yaw
 
 
+def rolling_pivot_turn_rate(speed, wheel_separation):
+    """Return the yaw rate that leaves the inner wheel stationary."""
+    return 2.0 * abs(float(speed)) / max(0.10, float(wheel_separation))
+
+
 def arc_motion_complete(
     start_pose,
     current_pose,
@@ -285,7 +290,7 @@ class GuardedReverse(Node):
         self.declare_parameter('sensor_timeout', 0.50)
         self.declare_parameter('time_limit', 3.0)
         self.declare_parameter('arc_speed', 0.05)
-        self.declare_parameter('arc_turn_rate', 0.18)
+        self.declare_parameter('wheel_separation', 0.36094)
         self.declare_parameter('arc_distance', 0.07)
         self.declare_parameter('arc_yaw', 0.22)
         self.declare_parameter('arc_start_rear_clearance', 0.32)
@@ -310,8 +315,13 @@ class GuardedReverse(Node):
             self.get_parameter('time_limit').value)))
         self.arc_speed = min(0.07, max(0.03, float(
             self.get_parameter('arc_speed').value)))
-        self.arc_turn_rate = min(0.25, max(0.12, float(
-            self.get_parameter('arc_turn_rate').value)))
+        wheel_separation = max(0.10, float(
+            self.get_parameter('wheel_separation').value))
+        # Pivot around the stationary inner wheel.  A shallow arc requested
+        # only ~5 RPM from that wheel, below this drivetrain's controllable
+        # range, so minimum PWM made the robot turn in the opposite direction.
+        self.arc_turn_rate = rolling_pivot_turn_rate(
+            self.arc_speed, wheel_separation)
         self.arc_distance = min(0.14, max(0.06, float(
             self.get_parameter('arc_distance').value)))
         self.arc_yaw = min(0.45, max(0.18, float(
@@ -333,16 +343,13 @@ class GuardedReverse(Node):
 
         self.data_lock = threading.Lock()
         self.operation_lock = threading.Lock()
-        self.latest_scan = None
-        self.latest_left_clearance = None
-        self.latest_right_clearance = None
         self.latest_scan_geometry = None
         self.scan_monotonic = 0.0
         self.latest_odom = None
         self.latest_yaw = None
         self.odom_monotonic = 0.0
         callbacks = ReentrantCallbackGroup()
-        self.publisher = self.create_publisher(Twist, '/cmd_vel_escape', 10)
+        self.publisher = self.create_publisher(Twist, '/cmd_vel_recovery', 10)
         self.create_subscription(
             LaserScan,
             str(self.get_parameter('scan_topic').value),
@@ -377,26 +384,12 @@ class GuardedReverse(Node):
         )
 
     def scan_callback(self, message):
-        clearance, left_clearance, right_clearance = (
-            recovery_sector_clearances(
-                message.ranges,
-                angle_min=message.angle_min,
-                angle_increment=message.angle_increment,
-                range_min=message.range_min,
-                range_max=message.range_max,
-            )
-        )
         with self.data_lock:
-            self.latest_scan = clearance
-            self.latest_left_clearance = left_clearance
-            self.latest_right_clearance = right_clearance
-            self.latest_scan_geometry = {
-                'ranges': tuple(message.ranges),
-                'angle_min': float(message.angle_min),
-                'angle_increment': float(message.angle_increment),
-                'range_min': float(message.range_min),
-                'range_max': float(message.range_max),
-            }
+            # Keep the immutable callback snapshot by reference.  Copying every
+            # range at sensor rate consumed a full CPU core fraction even while
+            # recovery was idle.  Geometry is materialized only when a recovery
+            # service actually needs it.
+            self.latest_scan_geometry = message
             self.scan_monotonic = time.monotonic()
 
     def odom_callback(self, message):
@@ -419,20 +412,25 @@ class GuardedReverse(Node):
 
     def snapshot(self):
         with self.data_lock:
-            return (
-                self.latest_scan,
-                self.scan_monotonic,
-                self.latest_odom,
-                self.odom_monotonic,
-            )
+            scan = self.latest_scan_geometry
+            scan_time = self.scan_monotonic
+            odom = self.latest_odom
+            odom_time = self.odom_monotonic
+        clearance = None
+        if scan is not None:
+            clearance = recovery_sector_clearances(
+                scan.ranges,
+                angle_min=float(scan.angle_min),
+                angle_increment=float(scan.angle_increment),
+                range_min=float(scan.range_min),
+                range_max=float(scan.range_max),
+            )[0]
+        return clearance, scan_time, odom, odom_time
 
     def arc_snapshot(self, turn_direction):
         with self.data_lock:
-            side_clearance = (
-                self.latest_left_clearance
-                if turn_direction > 0
-                else self.latest_right_clearance
-            )
+            scan = self.latest_scan_geometry
+            scan_time = self.scan_monotonic
             pose = None
             if self.latest_odom is not None and self.latest_yaw is not None:
                 pose = (
@@ -440,14 +438,26 @@ class GuardedReverse(Node):
                     self.latest_odom[1],
                     self.latest_yaw,
                 )
-            return (
-                self.latest_scan,
-                side_clearance,
-                self.latest_scan_geometry,
-                self.scan_monotonic,
-                pose,
-                self.odom_monotonic,
-            )
+            odom_time = self.odom_monotonic
+        rear = side_clearance = None
+        if scan is not None:
+            scan = {
+                'ranges': scan.ranges,
+                'angle_min': float(scan.angle_min),
+                'angle_increment': float(scan.angle_increment),
+                'range_min': float(scan.range_min),
+                'range_max': float(scan.range_max),
+            }
+            rear, left, right = recovery_sector_clearances(**scan)
+            side_clearance = left if turn_direction > 0 else right
+        return (
+            rear,
+            side_clearance,
+            scan,
+            scan_time,
+            pose,
+            odom_time,
+        )
 
     def publish_stop(self):
         self.publisher.publish(Twist())

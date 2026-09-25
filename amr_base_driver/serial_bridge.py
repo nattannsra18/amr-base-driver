@@ -89,6 +89,17 @@ class SerialBridge(Node):
         self.temperature = float('nan')
         self.requested_linear = 0.0
         self.requested_angular = 0.0
+        self.target_left_rpm = 0.0
+        self.target_right_rpm = 0.0
+        self.measured_left_rpm = 0.0
+        self.measured_right_rpm = 0.0
+        self.encoder_left_count = 0
+        self.encoder_right_count = 0
+        self.encoder_left_delta = 0
+        self.encoder_right_delta = 0
+        self.wheel_linear_mps = 0.0
+        self.wheel_angular_rps = 0.0
+        self.imu_angular_z_rps = 0.0
         self.motion_guard = MotionGuard()
 
         self.previous_left = None
@@ -111,13 +122,15 @@ class SerialBridge(Node):
             Trigger, 'clear_motor_fault', self.clear_motor_fault)
         self.create_service(
             SetBool, 'finish_motor_recovery', self.finish_motor_recovery)
-        self.create_timer(0.01, self.io_tick)
+        self.create_service(
+            Trigger, 'block_motor_recovery', self.block_motor_recovery)
+        # 50 Hz is well above the MCU telemetry rate and avoids waking the
+        # Python executor 100 times per second just to receive EAGAIN.
+        self.create_timer(0.02, self.io_tick)
         self.create_timer(0.10, self.command_tick)
-        # Pre-stall is deliberately detected before the ESP32's hard encoder
-        # latch. Publish it at the same practical cadence as command updates
-        # so the recovery coordinator can stop, inspect the scan, and select
-        # one escape before that hardware deadline expires.
-        self.create_timer(0.10, self.diagnostic_tick)
+        # Normal diagnostics are low-rate to keep DDS/JSON merging off the C4
+        # hot path. Fault and pre-stall transitions publish immediately below.
+        self.create_timer(1.0, self.diagnostic_tick)
 
         self.get_logger().info(
             f'ESP32 bridge starting on {self.port}; '
@@ -166,7 +179,21 @@ class SerialBridge(Node):
         response.message = (
             'Recovery completed; wheel feedback must remain healthy to rearm'
             if request.data else
-            f'Recovery failed; latched {self.motion_guard.fault}'
+            'Recovery motion failed without claiming an ESP32 or wheel fault: '
+            f'{self.motion_guard.recovery_failed}'
+        )
+        return response
+
+    def block_motor_recovery(self, _request, response):
+        """Record a safety refusal without converting it into a motor fault."""
+        if not self.motion_guard.block_recovery():
+            response.success = False
+            response.message = 'No pre-stall recovery is pending'
+            return response
+        self.write_line('STOP')
+        response.success = True
+        response.message = (
+            'Recovery blocked by safety; no ESP32 or wheel fault was asserted'
         )
         return response
 
@@ -287,6 +314,8 @@ class SerialBridge(Node):
                    self.mcu_fault == 0 and not self.motion_guard.blocks_motion)
         if not healthy:
             self.motion_guard.command(now, [0.0, 0.0])
+            self.target_left_rpm = 0.0
+            self.target_right_rpm = 0.0
             self.write_line('STOP')
             return
         if self.motors_enabled and fresh:
@@ -303,6 +332,8 @@ class SerialBridge(Node):
                 left_rpm *= ratio
                 right_rpm *= ratio
         self.motion_guard.command(now, [left_rpm, right_rpm])
+        self.target_left_rpm = left_rpm
+        self.target_right_rpm = right_rpm
         self.write_line(
             f'CMD,{self.command_sequence},{left_rpm:.3f},{right_rpm:.3f}')
         self.command_sequence = (self.command_sequence + 1) & 0xFFFFFFFF
@@ -348,9 +379,15 @@ class SerialBridge(Node):
         left_rpm, right_rpm = (value / 100.0 for value in values[7:9])
         accel = [value / 1000.0 for value in values[9:12]]
         gyro = [value / 100.0 for value in values[12:15]]
+        self.imu_angular_z_rps = gyro[2] * math.pi / 180.0
         self.temperature = values[15] / 100.0
+        previous_mcu_fault = self.mcu_fault
         self.mcu_flags = values[16]
         self.mcu_fault = values[17]
+        self.encoder_left_count = left_count
+        self.encoder_right_count = right_count
+        self.measured_left_rpm = left_rpm
+        self.measured_right_rpm = right_rpm
 
         self.last_telemetry_monotonic = time.monotonic()
         previous_fault = self.motion_guard.fault
@@ -365,6 +402,12 @@ class SerialBridge(Node):
             self.get_logger().warning(
                 'Motors paused before fault latch: '
                 f'{self.motion_guard.pre_stall}; waiting for one recovery attempt')
+        if (
+            reason
+            or self.motion_guard.pre_stall != previous_pre_stall
+            or self.mcu_fault != previous_mcu_fault
+        ):
+            self.diagnostic_tick()
         self.telemetry_count += 1
         if self.telemetry_count % self.telemetry_publish_divisor:
             return
@@ -420,6 +463,8 @@ class SerialBridge(Node):
         delta_ms = (mcu_ms - self.previous_mcu_ms) & 0xFFFFFFFF
         left_delta = wrapped_int32_delta(left_count, self.previous_left)
         right_delta = wrapped_int32_delta(right_count, self.previous_right)
+        self.encoder_left_delta = left_delta
+        self.encoder_right_delta = right_delta
         self.previous_left = left_count
         self.previous_right = right_count
         self.previous_mcu_ms = mcu_ms
@@ -430,6 +475,8 @@ class SerialBridge(Node):
         right_distance = (right_delta / self.right_cpr) * 2.0 * math.pi * self.radius
         distance = 0.5 * (left_distance + right_distance)
         delta_yaw = (right_distance - left_distance) / self.separation
+        self.wheel_linear_mps = distance / dt
+        self.wheel_angular_rps = delta_yaw / dt
         self.x += distance * math.cos(self.yaw + 0.5 * delta_yaw)
         self.y += distance * math.sin(self.yaw + 0.5 * delta_yaw)
         self.yaw = math.atan2(math.sin(self.yaw + delta_yaw),
@@ -456,53 +503,124 @@ class SerialBridge(Node):
         now = time.monotonic()
         age = (now - self.last_telemetry_monotonic
                if self.last_telemetry_monotonic else float('inf'))
-        status = DiagnosticStatus()
-        status.name = 'ESP32 base controller'
-        status.hardware_id = 'esp32-uart-c'
+
+        serial = DiagnosticStatus()
+        serial.name = 'Base serial telemetry'
+        serial.hardware_id = 'odroid-uart-c'
         if self.serial_port is None or age > 0.5:
-            status.level = DiagnosticStatus.ERROR
-            status.message = 'No fresh ESP32 telemetry'
-        elif self.mcu_fault:
-            status.level = DiagnosticStatus.ERROR
-            names = {1: 'IMU', 2: 'LEFT_ENCODER_STALL',
-                     3: 'RIGHT_ENCODER_STALL', 4: 'ENCODER_DIRECTION'}
-            fault_name = names.get(self.mcu_fault, 'UNKNOWN')
-            status.message = f'ESP32 fault {self.mcu_fault}: {fault_name}'
-        elif self.motion_guard.fault:
-            status.level = DiagnosticStatus.ERROR
-            status.message = self.motion_guard.fault
-        elif self.motion_guard.pre_stall:
-            status.level = DiagnosticStatus.WARN
-            status.message = f'PRE_STALL: {self.motion_guard.pre_stall}'
-        elif self.motion_guard.recovery_in_progress:
-            status.level = DiagnosticStatus.WARN
-            status.message = 'Wheel feedback recovery in progress'
-        elif not self.motors_enabled:
-            status.level = DiagnosticStatus.WARN
-            status.message = 'Healthy; motors locked for bench validation'
+            serial.level = DiagnosticStatus.ERROR
+            serial.message = 'No fresh ESP32 telemetry'
         else:
-            status.level = DiagnosticStatus.OK
-            status.message = 'Healthy'
-        status.values = [
+            serial.level = DiagnosticStatus.OK
+            serial.message = 'Fresh telemetry'
+        serial.values = [
             KeyValue(key='port', value=self.port),
             KeyValue(key='telemetry_age_s', value=f'{age:.3f}'),
             KeyValue(key='telemetry_count', value=str(self.telemetry_count)),
             KeyValue(key='parse_errors', value=str(self.parse_errors)),
+        ]
+
+        mcu = DiagnosticStatus()
+        mcu.name = 'ESP32 MCU fault'
+        mcu.hardware_id = 'esp32-uart-c'
+        if self.mcu_fault:
+            mcu.level = DiagnosticStatus.ERROR
+            names = {1: 'IMU', 2: 'LEFT_ENCODER_STALL',
+                     3: 'RIGHT_ENCODER_STALL', 4: 'ENCODER_DIRECTION'}
+            fault_name = names.get(self.mcu_fault, 'UNKNOWN')
+            mcu.message = f'ESP32 fault {self.mcu_fault}: {fault_name}'
+        else:
+            mcu.level = DiagnosticStatus.OK
+            mcu.message = 'No MCU fault'
+        mcu.values = [
             KeyValue(key='mcu_flags', value=str(self.mcu_flags)),
             KeyValue(key='mcu_fault', value=str(self.mcu_fault)),
+            KeyValue(key='imu_temperature_c', value=f'{self.temperature:.2f}'),
+        ]
+
+        host = DiagnosticStatus()
+        host.name = 'Host wheel feedback'
+        host.hardware_id = 'odroid-motion-guard'
+        if self.motion_guard.fault:
+            host.level = DiagnosticStatus.ERROR
+            host.message = self.motion_guard.fault
+        elif self.motion_guard.pre_stall:
+            host.level = DiagnosticStatus.WARN
+            host.message = f'PRE_STALL: {self.motion_guard.pre_stall}'
+        elif self.motion_guard.recovery_in_progress:
+            host.level = DiagnosticStatus.WARN
+            host.message = 'Wheel feedback recovery in progress'
+        else:
+            host.level = DiagnosticStatus.OK
+            host.message = 'Wheel feedback healthy'
+        host.values = [
             KeyValue(key='host_motion_fault', value=self.motion_guard.fault),
             KeyValue(key='host_motion_state', value=self.motion_guard.state),
             KeyValue(
                 key='host_motion_reason',
                 value=(self.motion_guard.pre_stall
                        or self.motion_guard.recovery_reason)),
-            KeyValue(key='imu_temperature_c',
-                     value=f'{self.temperature:.2f}'),
             KeyValue(key='motors_enabled', value=str(self.motors_enabled)),
+            KeyValue(
+                key='target_left_rpm', value=f'{self.target_left_rpm:.3f}'),
+            KeyValue(
+                key='target_right_rpm', value=f'{self.target_right_rpm:.3f}'),
+            KeyValue(
+                key='measured_left_rpm', value=f'{self.measured_left_rpm:.3f}'),
+            KeyValue(
+                key='measured_right_rpm', value=f'{self.measured_right_rpm:.3f}'),
+            KeyValue(
+                key='encoder_left_count', value=str(self.encoder_left_count)),
+            KeyValue(
+                key='encoder_right_count', value=str(self.encoder_right_count)),
+            KeyValue(
+                key='encoder_left_delta', value=str(self.encoder_left_delta)),
+            KeyValue(
+                key='encoder_right_delta', value=str(self.encoder_right_delta)),
+            KeyValue(
+                key='requested_linear_mps',
+                value=f'{self.requested_linear:.4f}'),
+            KeyValue(
+                key='requested_angular_rps',
+                value=f'{self.requested_angular:.4f}'),
+            KeyValue(
+                key='wheel_linear_mps', value=f'{self.wheel_linear_mps:.4f}'),
+            KeyValue(
+                key='wheel_angular_rps', value=f'{self.wheel_angular_rps:.4f}'),
+            KeyValue(
+                key='imu_angular_z_rps',
+                value=f'{self.imu_angular_z_rps:.4f}'),
+        ]
+
+        recovery = DiagnosticStatus()
+        recovery.name = 'Base recovery'
+        recovery.hardware_id = 'odroid-recovery'
+        if self.motion_guard.recovery_failed:
+            recovery.level = DiagnosticStatus.ERROR
+            recovery.message = (
+                f'Recovery motion failed: {self.motion_guard.recovery_failed}'
+            )
+        elif self.motion_guard.recovery_blocked:
+            recovery.level = DiagnosticStatus.WARN
+            recovery.message = (
+                'RECOVERY_BLOCKED: no remaining maneuver passed safety checks'
+            )
+        else:
+            recovery.level = DiagnosticStatus.OK
+            recovery.message = 'No blocked recovery'
+        recovery.values = [
+            KeyValue(
+                key='recovery_blocked',
+                value=self.motion_guard.recovery_blocked,
+            ),
+            KeyValue(
+                key='recovery_failed',
+                value=self.motion_guard.recovery_failed,
+            ),
         ]
         array = DiagnosticArray()
         array.header.stamp = self.get_clock().now().to_msg()
-        array.status = [status]
+        array.status = [serial, mcu, host, recovery]
         self.diag_pub.publish(array)
 
     def destroy_node(self):

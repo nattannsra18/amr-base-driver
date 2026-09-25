@@ -37,6 +37,7 @@ class SensorDashboard(Node):
         self.odom = None
         self.scan = None
         self.diagnostic = None
+        self.diagnostic_fields = {}
         self.times = {}
         self.scan_rate = 0.0
         self.previous_scan_time = 0.0
@@ -95,8 +96,16 @@ class SensorDashboard(Node):
 
     def on_diagnostic(self, message):
         for status in message.status:
-            if status.name == 'ESP32 base controller':
+            if status.name in {
+                'ESP32 base controller',
+                'ESP32 MCU fault',
+                'Host wheel feedback',
+                'Base serial telemetry',
+                'Base recovery',
+            }:
                 self.diagnostic = status
+                self.diagnostic_fields.update(
+                    {item.key: item.value for item in status.values})
                 self.mark('diagnostic')
 
     def joint_values(self):
@@ -113,7 +122,7 @@ class SensorDashboard(Node):
     def diagnostic_values(self):
         if self.diagnostic is None:
             return 'NO DATA', '-', '-', '-'
-        values = {item.key: item.value for item in self.diagnostic.values}
+        values = self.diagnostic_fields
         return (self.diagnostic.message,
                 values.get('mcu_fault', '-'),
                 values.get('mcu_flags', '-'),

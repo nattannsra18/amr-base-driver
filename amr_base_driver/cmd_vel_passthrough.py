@@ -1,59 +1,116 @@
+import enum
 import time
 
+from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import Twist
 import rclpy
 from rclpy.node import Node
 
 
-class EscapePriorityGate:
-    """Give a bounded recovery stream priority over normal velocity commands."""
+class CommandOwner(str, enum.Enum):
+    STOPPED = 'STOPPED'
+    NAVIGATION = 'NAVIGATION'
+    MANUAL = 'MANUAL'
+    RECOVERY = 'RECOVERY'
 
-    def __init__(self, lease_seconds=0.20):
+
+class CommandArbiter:
+    """Small lease-based state machine for exclusive base command ownership."""
+
+    PRIORITY = (
+        CommandOwner.STOPPED,
+        CommandOwner.RECOVERY,
+        CommandOwner.MANUAL,
+        CommandOwner.NAVIGATION,
+    )
+
+    def __init__(self, lease_seconds=0.25):
         self.lease_seconds = float(lease_seconds)
-        self.escape_until = 0.0
-        self.escape_active = False
+        self.deadlines = {owner: 0.0 for owner in self.PRIORITY}
+        self.owner = CommandOwner.STOPPED
 
-    def accept_normal(self, now):
-        return not self.escape_active or now >= self.escape_until
-
-    def accept_escape(self, now):
-        self.escape_active = True
-        self.escape_until = now + self.lease_seconds
+    def accept(self, owner, now):
+        if owner not in self.deadlines:
+            raise ValueError(f'{owner} cannot publish motion commands')
+        if (
+            owner != CommandOwner.STOPPED
+            and self.deadlines[CommandOwner.STOPPED] > now
+        ):
+            return False, False
+        if owner == CommandOwner.STOPPED:
+            for source in self.deadlines:
+                self.deadlines[source] = 0.0
+        self.deadlines[owner] = float(now) + self.lease_seconds
+        previous = self.owner
+        self.owner = self._select(now)
+        return self.owner == owner, self.owner != previous
 
     def expire(self, now):
-        if self.escape_active and now >= self.escape_until:
-            self.escape_active = False
-            return True
-        return False
+        previous = self.owner
+        self.owner = self._select(now)
+        return self.owner != previous
+
+    def _select(self, now):
+        for owner in self.PRIORITY:
+            if self.deadlines[owner] > now:
+                return owner
+        return CommandOwner.STOPPED
 
 
 class CmdVelPassthrough(Node):
-    """Relay one command source at a time to the hardware serial bridge."""
+    """Arbitrate NAVIGATION, RECOVERY and MANUAL into one safe motor stream."""
 
     def __init__(self):
         super().__init__('cmd_vel_passthrough')
-        self.declare_parameter('escape_lease_seconds', 0.20)
-        self.gate = EscapePriorityGate(
-            self.get_parameter('escape_lease_seconds').value)
+        self.declare_parameter('command_lease_seconds', 0.25)
+        self.arbiter = CommandArbiter(
+            self.get_parameter('command_lease_seconds').value)
         self.publisher = self.create_publisher(Twist, '/cmd_vel_safe', 10)
-        self.subscription = self.create_subscription(
-            Twist, '/cmd_vel', self.normal_command, 10)
-        self.escape_subscription = self.create_subscription(
-            Twist, '/cmd_vel_escape', self.escape_command, 10)
-        self.watchdog = self.create_timer(0.05, self.expire_escape)
+        self.diagnostics = self.create_publisher(
+            DiagnosticArray, '/diagnostics', 10)
+        self.create_subscription(
+            Twist, '/cmd_vel_navigation',
+            lambda command: self.command(CommandOwner.NAVIGATION, command), 10)
+        self.create_subscription(
+            Twist, '/cmd_vel_recovery',
+            lambda command: self.command(CommandOwner.RECOVERY, command), 10)
+        self.create_subscription(
+            Twist, '/cmd_vel_manual',
+            lambda command: self.command(CommandOwner.MANUAL, command), 10)
+        self.create_subscription(
+            Twist, '/cmd_vel_stop',
+            lambda command: self.command(CommandOwner.STOPPED, command), 10)
+        self.watchdog = self.create_timer(0.05, self.expire_owner)
+        self.diagnostic_timer = self.create_timer(0.5, self.publish_diagnostic)
+        self.get_logger().info(
+            'Command ownership ready: NAVIGATION, RECOVERY, MANUAL -> '
+            '/cmd_vel_safe')
 
-    def normal_command(self, command):
-        if self.gate.accept_normal(time.monotonic()):
-            self.publisher.publish(command)
-
-    def escape_command(self, command):
-        self.gate.accept_escape(time.monotonic())
-        self.publisher.publish(command)
-
-    def expire_escape(self):
-        if self.gate.expire(time.monotonic()):
-            # Never hand control back with the last reverse command latched.
+    def command(self, owner, command):
+        accepted, changed = self.arbiter.accept(owner, time.monotonic())
+        if changed:
+            # Ensure a command from the old owner cannot remain latched.
             self.publish_stop()
+        if accepted and owner != CommandOwner.STOPPED:
+            self.publisher.publish(command)
+        elif accepted:
+            self.publish_stop()
+
+    def expire_owner(self):
+        if self.arbiter.expire(time.monotonic()):
+            self.publish_stop()
+
+    def publish_diagnostic(self):
+        message = DiagnosticArray()
+        message.header.stamp = self.get_clock().now().to_msg()
+        status = DiagnosticStatus()
+        status.name = 'Base command ownership'
+        status.hardware_id = 'host-command-arbiter'
+        status.level = DiagnosticStatus.OK
+        status.message = self.arbiter.owner.value
+        status.values = [KeyValue(key='owner', value=self.arbiter.owner.value)]
+        message.status = [status]
+        self.diagnostics.publish(message)
 
     def publish_stop(self):
         self.publisher.publish(Twist())

@@ -213,7 +213,7 @@ def test_recovery_teleop_is_limited_and_deadman_stops_motion():
     value = bridge()
     value.localization_recovery_active = True
     published = []
-    value.emergency_velocity_publisher = SimpleNamespace(
+    value.manual_velocity_publisher = SimpleNamespace(
         publish=published.append
     )
     asyncio.run(WebBridgeNode.handle_localization_teleop(value, None, {
@@ -237,7 +237,7 @@ def test_recovery_teleop_is_limited_and_deadman_stops_motion():
 def test_recovery_teleop_is_rejected_outside_global_search():
     value = bridge()
     published = []
-    value.emergency_velocity_publisher = SimpleNamespace(
+    value.manual_velocity_publisher = SimpleNamespace(
         publish=published.append
     )
     value.get_logger = lambda: SimpleNamespace(warning=lambda _message: None)
@@ -255,7 +255,7 @@ def test_automatic_scan_rotates_and_stops_on_timeout():
     value.localization_recovery_active = True
     published = []
     stopped = []
-    value.emergency_velocity_publisher = SimpleNamespace(
+    value.manual_velocity_publisher = SimpleNamespace(
         publish=published.append
     )
     value.publish_zero_velocity = lambda: stopped.append(True)

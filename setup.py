@@ -1,4 +1,5 @@
 from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'amr_base_driver'
@@ -29,6 +30,8 @@ setup(
             'imu_conditioner = amr_base_driver.imu_conditioner:main',
             'nav2_activation_gate = '
             'amr_base_driver.nav2_activation_gate:main',
+            'localization_readiness_gate = '
+            'amr_base_driver.localization_readiness_gate:main',
             'drive_supervisor = amr_base_driver.drive_supervisor:main',
             'cmd_vel_passthrough = '
             'amr_base_driver.cmd_vel_passthrough:main',
@@ -38,6 +41,9 @@ setup(
             'scan_resampler = amr_base_driver.scan_resampler:main',
             'sensor_dashboard = amr_base_driver.sensor_dashboard:main',
             'calibration_run = amr_base_driver.calibration_run:main',
+            'black_box_recorder = '
+            'amr_base_driver.black_box_recorder:main',
+            'motion_audit = amr_base_driver.motion_audit:main',
         ],
     },
 )

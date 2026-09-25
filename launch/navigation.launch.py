@@ -2,10 +2,11 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, GroupAction
 from launch.actions import IncludeLaunchDescription
-from launch.actions import TimerAction
+from launch.actions import RegisterEventHandler
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
@@ -29,7 +30,6 @@ def generate_launch_description():
         launch_arguments={
             'map_yaml': map_yaml,
             'enable_motors': enable_motors,
-            'enable_drive_supervisor': 'false',
             'ekf_transform_time_offset': ekf_transform_time_offset,
             'start_localization': start_localization,
         }.items(),
@@ -136,6 +136,34 @@ def generate_launch_description():
             activate_after_initial_pose, "' == 'true'",
         ])),
     )
+    localization_ready = Node(
+        package='amr_base_driver',
+        executable='localization_readiness_gate',
+        name='navigation_process_readiness_gate',
+        output='screen',
+        condition=IfCondition(PythonExpression([
+            "'", start_navigation, "' == 'true' and '",
+            start_localization, "' == 'true'",
+        ])),
+        parameters=[{'request_startup': False}],
+    )
+    navigation_processes = GroupAction(actions=[
+        controller,
+        planner,
+        smoother,
+        velocity_smoother,
+        collision_monitor,
+        behavior_server,
+        bt_navigator,
+        lifecycle_manager,
+        activation_gate,
+    ])
+    start_navigation_when_localized = RegisterEventHandler(
+        OnProcessExit(
+            target_action=localization_ready,
+            on_exit=[navigation_processes],
+        )
+    )
 
     default_params = os.path.join(
         base_share, 'config', 'nav2_physical.yaml')
@@ -169,18 +197,9 @@ def generate_launch_description():
                 'Future offset for odom to base TF. This applies only to '
                 'localization/Nav2; mapping keeps the EKF default of zero.')),
         localization,
-        TimerAction(
-            period=12.0,
-            actions=[
-                controller,
-                planner,
-                smoother,
-                velocity_smoother,
-                collision_monitor,
-                behavior_server,
-                bt_navigator,
-                lifecycle_manager,
-                activation_gate,
-            ],
-        ),
+        # Start the heavier Nav2 process group only after map_server and AMCL
+        # are active. This is lifecycle readiness, not a hardware-specific
+        # fixed delay.
+        start_navigation_when_localized,
+        localization_ready,
     ])

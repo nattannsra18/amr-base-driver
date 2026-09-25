@@ -1,6 +1,7 @@
 """Angle-aware fixed-bin LaserScan resampling for the YDLidar X3."""
 
 import math
+import time
 
 import rclpy
 from rclpy.executors import ExternalShutdownException
@@ -46,20 +47,30 @@ class ScanResampler(Node):
         super().__init__('scan_resampler')
         self.declare_parameter('input_topic', '/scan_raw')
         self.declare_parameter('output_topic', '/scan')
+        self.declare_parameter('telemetry_topic', '/scan_recovery')
+        self.declare_parameter('telemetry_hz', 4.0)
         self.declare_parameter('output_beams', 360)
         self.output_beams = int(self.get_parameter('output_beams').value)
         if self.output_beams < 90:
             raise ValueError('output_beams must be at least 90')
         input_topic = self.get_parameter('input_topic').value
         output_topic = self.get_parameter('output_topic').value
+        telemetry_topic = self.get_parameter('telemetry_topic').value
+        telemetry_hz = max(
+            1.0, float(self.get_parameter('telemetry_hz').value))
+        self.telemetry_interval = 1.0 / telemetry_hz
+        self.last_telemetry_publish = -math.inf
         self.publisher = self.create_publisher(
             LaserScan, output_topic, qos_profile_sensor_data)
+        self.telemetry_publisher = self.create_publisher(
+            LaserScan, telemetry_topic, qos_profile_sensor_data)
         self.create_subscription(
             LaserScan, input_topic, self.callback, qos_profile_sensor_data)
         self.input_count = 0
         self.get_logger().info(
             f'Angle-aware scan resampling: {input_topic} -> {output_topic}; '
-            f'{self.output_beams} beams')
+            f'{self.output_beams} beams; {telemetry_topic} at '
+            f'{telemetry_hz:.1f} Hz')
 
     def callback(self, raw):
         if not has_valid_scan_metadata(raw):
@@ -85,6 +96,10 @@ class ScanResampler(Node):
         # X3 is configured without intensity, so do not fabricate values.
         output.intensities = []
         self.publisher.publish(output)
+        now = time.monotonic()
+        if now - self.last_telemetry_publish >= self.telemetry_interval:
+            self.telemetry_publisher.publish(output)
+            self.last_telemetry_publish = now
         self.input_count += 1
 
 

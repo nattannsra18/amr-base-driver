@@ -4,7 +4,6 @@ from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import IncludeLaunchDescription
-from launch.actions import TimerAction
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -16,7 +15,6 @@ def generate_launch_description():
 
     map_file = LaunchConfiguration('map_yaml')
     enable_motors = LaunchConfiguration('enable_motors')
-    enable_drive_supervisor = LaunchConfiguration('enable_drive_supervisor')
     start_localization = LaunchConfiguration('start_localization')
     ekf_transform_time_offset = LaunchConfiguration(
         'ekf_transform_time_offset')
@@ -26,7 +24,6 @@ def generate_launch_description():
             os.path.join(base_share, 'launch', 'base_hardware.launch.py')),
         launch_arguments={
             'enable_motors': enable_motors,
-            'enable_drive_supervisor': enable_drive_supervisor,
             'publish_sensor_tf': 'true',
             'ekf_transform_time_offset': ekf_transform_time_offset,
         }.items(),
@@ -48,6 +45,7 @@ def generate_launch_description():
         parameters=[{
             'input_topic': '/scan_raw',
             'output_topic': '/scan',
+            'telemetry_hz': 2.0,
             'output_beams': 360,
         }],
     )
@@ -76,9 +74,21 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(start_localization),
         parameters=[{
-            'autostart': True,
+            # The readiness gate owns startup and retries transient DDS load.
+            'autostart': False,
+            # DDS discovery on the C4 is briefly CPU-bound during bring-up.
+            # Keep lifecycle readiness authoritative without a fixed sleep.
+            'bond_timeout': 10.0,
             'node_names': ['map_server', 'amcl'],
         }],
+    )
+
+    readiness_gate = Node(
+        package='amr_base_driver',
+        executable='localization_readiness_gate',
+        name='localization_readiness_gate',
+        output='screen',
+        condition=IfCondition(start_localization),
     )
 
     return LaunchDescription([
@@ -94,18 +104,17 @@ def generate_launch_description():
             'enable_motors', default_value='false',
             description='Unlock motion only for an attended localization test.'),
         DeclareLaunchArgument(
-            'enable_drive_supervisor', default_value='false',
-            description=(
-                'DEPRECATED/EXPERIMENTAL. Keep disabled for the supported '
-                'localization and navigation path.')),
-        DeclareLaunchArgument(
             'ekf_transform_time_offset', default_value='0.10',
             description=(
                 'Future offset for odom to base TF during localization. '
                 'The measured controller-side lag reached 93 ms.')),
         base_launch,
-        TimerAction(period=3.0, actions=[lidar, scan_resampler]),
-        TimerAction(
-            period=8.0,
-            actions=[map_server, amcl, lifecycle_manager]),
+        # ROS subscriptions and lifecycle services are the readiness boundary;
+        # fixed sleeps made startup slower and still raced on a loaded C4.
+        lidar,
+        scan_resampler,
+        map_server,
+        amcl,
+        lifecycle_manager,
+        readiness_gate,
     ])

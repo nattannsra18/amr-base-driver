@@ -14,7 +14,9 @@ amr_web_bridge:
     pose_topic: /amcl_pose
     map_topic: /map
     odom_topic: /odometry/filtered
-    scan_topic: /scan
+    # Recovery decisions only need a fresh low-rate scan. Nav2 keeps the full
+    # /scan stream while the web agent avoids deserializing every LiDAR frame.
+    scan_topic: /scan_recovery
     battery_topic: /battery_state
     physical_estop_topic: /safety/physical_estop
     physical_estop_stale_seconds: 2.0
@@ -26,7 +28,8 @@ amr_web_bridge:
     initial_pose_topic: /initialpose
     amcl_state_service: /amcl/get_state
     global_localization_service: /reinitialize_global_localization
-    emergency_stop_cmd_vel_topic: /cmd_vel
+    emergency_stop_cmd_vel_topic: /cmd_vel_stop
+    manual_cmd_vel_topic: /cmd_vel_manual
     base_frame: base_footprint
 
     maps_directory: /home/odroid/amr_ws/maps

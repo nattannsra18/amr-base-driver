@@ -115,9 +115,10 @@ ros2 run amr_web_bridge web_bridge_node --ros-args \
 ```
 
 The systemd Agent and navigation stack use the same Fast DDS implementation
-with UDP-only transport. This lets the restricted service user receive topics
-and call lifecycle services without depending on cross-user shared memory. The
-installer also grants that account a narrow ACL for the configured map
+with UDP-only, localhost-scoped transport. ROS stays inside the ODROID while
+the Agent's WebSocket remains the authenticated network boundary. This also
+avoids cross-user shared-memory permissions and unnecessary LAN discovery. The
+installer grants the Agent a narrow ACL for the configured map
 directory so map catalogs and map-management operations remain available.
 
 For ODROID service installation, use the included installer. It builds a
@@ -336,6 +337,40 @@ ros2 service call /set_motors_enabled std_srvs/srv/SetBool "{data: true}"
 
 Use the physical cutoff or a deliberate software stop when motion must stop;
 normal localization, Nav2, and web-service restarts do not lock the motors.
+
+### Black-box latency semantics
+
+`black_box_recorder` retains rolling JSONL segments under
+`~/.local/state/indoor-delivery-robot/black-box`.  The `age_ms` field is the
+ROS message-header timestamp to recorder-callback age measured on the same
+ODROID clock.  It is an operational end-to-end proxy that includes publisher,
+executor, DDS transport, and scheduling delay; sensor topics may also include
+driver timestamping delay.  It is deliberately **not** labelled wire-only DDS
+latency.  This proxy is sufficient for diagnosing control-impacting stale data
+on the single-computer robot.  Use a sequence-matched ping/pong publisher only
+when validating DDS transport independently or moving publishers off-board.
+
+Audit a rolling window or an incident snapshot without sending any motion
+command. The report checks ESP32 faults, telemetry-inconsistent stall reports,
+expired commands that remain non-zero, and wheel-odometry/IMU direction signs:
+
+```bash
+ros2 run amr_base_driver motion_audit \
+  ~/.local/state/indoor-delivery-robot/black-box
+```
+
+`odometry_imu_sign: NO_DATA` is expected while stationary; it becomes PASS or
+FAIL only after the window contains commanded motion above the noise threshold.
+
+Run the attended encoder/odometry direction check only with a clear floor and
+the physical cutoff in reach.  Its safe defaults are 0.12 m for straight and
+reverse motion, 0.20 rad for each rolling pivot, and an 8 s hard deadline:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source ~/amr_ws/install/setup.bash
+./scripts/run_controlled_motion_hil.sh --execute
+```
 
 ## Mapping and localization
 

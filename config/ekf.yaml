@@ -1,6 +1,9 @@
 ekf_filter_node:
   ros__parameters:
-    frequency: 20.0
+    # Sensor telemetry is about 6.7 Hz on the physical base. A 15 Hz predict
+    # loop keeps TF responsive without the repeated deadline misses seen at
+    # 20 Hz on the ODROID-C4.
+    frequency: 15.0
     print_diagnostics: true
     # Cover the observed 0-38 ms publication/network jitter so RViz receives
     # odom->base before the corresponding laser timestamp.  Keep this small;

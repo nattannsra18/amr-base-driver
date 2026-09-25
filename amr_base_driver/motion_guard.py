@@ -21,6 +21,8 @@ class MotionGuard:
         self.recovery_reason = ''
         self.recovery_in_progress = False
         self.recovery_attempted = False
+        self.recovery_blocked = ''
+        self.recovery_failed = ''
         self.healthy_since = None
 
     @property
@@ -31,13 +33,20 @@ class MotionGuard:
             return 'PRE_STALL'
         if self.recovery_in_progress:
             return 'RECOVERING'
+        if self.recovery_blocked:
+            return 'RECOVERY_BLOCKED'
+        if self.recovery_failed:
+            return 'RECOVERY_FAILED'
         if self.recovery_attempted:
             return 'VERIFYING_RECOVERY'
         return 'NORMAL'
 
     @property
     def blocks_motion(self):
-        return bool(self.fault or self.pre_stall)
+        return bool(
+            self.fault or self.pre_stall
+            or self.recovery_blocked or self.recovery_failed
+        )
 
     def command(self, now, targets):
         for i, target in enumerate(targets):
@@ -66,7 +75,7 @@ class MotionGuard:
         return True
 
     def finish_recovery(self, success):
-        """Record the bounded maneuver outcome without hiding a real fault."""
+        """Finish motion verification without inventing an ESP32 fault."""
         if self.pre_stall and not success and not self.recovery_attempted:
             self.recovery_reason = self.pre_stall
             self.pre_stall = ''
@@ -75,11 +84,29 @@ class MotionGuard:
             return False
         self.recovery_in_progress = False
         self.healthy_since = None
-        # A wheel can fail on the opposite side while the authorized escape
-        # is running.  Preserve that fresh, observed fault instead of
-        # replacing it with the reason which opened the recovery window.
+        # A fresh missing-feedback sample can still set ``fault`` while the
+        # maneuver is running.  A generic maneuver failure is kept separate:
+        # timeout, stale odometry, and service errors do not prove wheel or MCU
+        # failure.
         if not success and not self.fault:
-            self.fault = self.recovery_reason or 'WHEEL_RECOVERY_FAILED'
+            self.recovery_failed = (
+                self.recovery_reason or 'WHEEL_RECOVERY_FAILED'
+            )
+        return True
+
+    def block_recovery(self):
+        """Stop after every scan-safe option was refused by a safety guard."""
+        if not (self.pre_stall or self.recovery_in_progress):
+            return False
+        if self.pre_stall:
+            self.recovery_reason = self.pre_stall
+            self.pre_stall = ''
+        self.recovery_in_progress = False
+        self.recovery_attempted = True
+        self.recovery_failed = ''
+        self.recovery_blocked = self.recovery_reason or 'NO_SAFE_ESCAPE'
+        self.healthy_since = None
+        self.missing_since = [None, None]
         return True
 
     def _moving_wheels_healthy(self, measured):
@@ -93,7 +120,10 @@ class MotionGuard:
         )
 
     def sample(self, now, measured):
-        if self.fault or self.pre_stall:
+        if (
+            self.fault or self.pre_stall
+            or self.recovery_blocked or self.recovery_failed
+        ):
             return self.fault
 
         if self.recovery_attempted and not self.recovery_in_progress:

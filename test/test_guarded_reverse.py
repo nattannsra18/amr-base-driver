@@ -4,12 +4,20 @@ from amr_base_driver.guarded_reverse import (
     adjacent_cluster_clearance,
     arc_motion_complete,
     measured_arc_progress,
+    rolling_pivot_turn_rate,
     normalize_angle,
     recovery_sector_clearances,
     robust_rear_clearance,
     robust_turn_side_clearance,
     swept_arc_obstacle_distance,
 )
+
+
+def test_rolling_pivot_rate_stops_the_inner_wheel():
+    speed = 0.05
+    separation = 0.36094
+    turn_rate = rolling_pivot_turn_rate(speed, separation)
+    assert abs((-speed) + 0.5 * separation * turn_rate) < 1e-9
 
 
 def scan(default=math.inf):
@@ -123,8 +131,8 @@ def test_adjacent_cluster_clearance_ignores_only_one_isolated_beam():
 
 def test_swept_arc_rejects_a_cluster_entering_the_rear_corner():
     ranges = scan()
-    ranges[227] = 0.13
-    ranges[228] = 0.13
+    ranges[230] = 0.13
+    ranges[231] = 0.13
 
     obstacle = swept_arc_obstacle_distance(
         ranges,

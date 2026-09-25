@@ -1,10 +1,10 @@
 import asyncio
-from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from queue import Queue
 import threading
 from types import SimpleNamespace
 
+from amr_web_bridge.mission_state import MissionCommandState
 from amr_web_bridge.web_bridge_node import WebBridgeNode
 
 
@@ -25,15 +25,16 @@ class Goal:
 
 
 def bridge():
+    mission_command_state = MissionCommandState()
     value = SimpleNamespace(
         emergency_stop_latched=threading.Event(),
         physical_estop_latched=threading.Event(),
         last_emergency_command_id=None,
         command_queue=Queue(),
         command_lock=threading.Lock(),
-        pending_command_ids=set(),
-        processed_command_ids=OrderedDict(),
-        processed_command_limit=512,
+        mission_command_state=mission_command_state,
+        pending_command_ids=mission_command_state.pending_ids,
+        processed_command_ids=mission_command_state.processed_ids,
         robot_id='robot01',
         profile_version='sim-v1',
         map_revision=7,

@@ -4,7 +4,8 @@ Documentation=https://github.com/nattannsra18/amr-base-driver
 After=network-online.target systemd-udev-settle.service
 Wants=network-online.target systemd-udev-settle.service
 Before=indoor-delivery-robot-agent.service
-StartLimitIntervalSec=0
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -16,7 +17,7 @@ EnvironmentFile=/etc/indoor-delivery-robot/navigation.env
 ExecStartPre=/usr/bin/test -c /dev/ttyAML6
 ExecStartPre=/usr/bin/test -e /dev/robot-lidar
 ExecStart=/usr/local/sbin/indoor-delivery-robot-navigation
-Restart=always
+Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 KillSignal=SIGINT

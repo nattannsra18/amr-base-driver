@@ -105,3 +105,37 @@ On 2026-09-20:
   downstream open-loop velocity smoother remains the physical limiter at
   0.40 rad/s^2. This changes one subsystem and preserves the gradual motor
   command ramp.
+
+## 2026-09-25 black-box and controlled-motion follow-up
+
+The rolling black-box uses message header age on the same ODROID clock as its
+operational latency metric.  This is publisher/header-to-recorder callback age
+(publisher + executor + DDS + scheduling, and possibly sensor-driver delay),
+not a wire-only DDS benchmark.  For this single-computer control path it is the
+more relevant stale-data signal.  A steady 60-second sample measured:
+
+| Stream | Samples | p50 | p95 | p99 | Maximum |
+|---|---:|---:|---:|---:|---:|
+| `/diagnostics` | 143 | 2.18 ms | 6.70 ms | 8.35 ms | 8.68 ms |
+| `/odometry/filtered` | 189 | 50.76 ms | 55.78 ms | 63.61 ms | 69.76 ms |
+| `/scan` | 188 | 90.19 ms | 96.79 ms | 101.27 ms | 104.46 ms |
+
+Host CPU over the same sample was 28.3 percent p50, 32.1 percent p95, and
+54.2 percent maximum.  Startup samples are evaluated separately because queued
+messages immediately after a lifecycle restart can have much larger age.
+
+The first controlled-motion sign checks confirmed:
+
+- forward: both encoder deltas positive;
+- reverse: both encoder deltas negative;
+- reverse rolling-left pivot: outer left wheel negative, inner right wheel
+  approximately stationary, odometry and IMU yaw positive;
+- reverse rolling-right pivot: outer right wheel negative, inner left wheel
+  approximately stationary, odometry and IMU yaw negative.
+
+A shallow arc that asked the inner wheel for roughly 5 RPM was rejected: the
+motor's minimum usable PWM drove that wheel faster than requested and could
+reverse the measured turn direction.  Recovery arcs now use a rolling-pivot
+rate derived from wheel separation so the inner wheel is commanded stationary.
+The complete post-deployment four-direction rerun and 20 attended deliveries
+remain pending; they must not be claimed from these partial measurements.
