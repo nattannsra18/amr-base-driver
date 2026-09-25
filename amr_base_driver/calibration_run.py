@@ -107,7 +107,7 @@ class CalibrationRun(Node):
             if status.name not in {
                 'ESP32 base controller',
                 'ESP32 MCU fault',
-                'Host wheel feedback',
+                'Base drive telemetry',
             }:
                 continue
             values = {item.key: item.value for item in status.values}
