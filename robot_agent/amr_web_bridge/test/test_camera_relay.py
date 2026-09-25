@@ -93,7 +93,7 @@ def test_camera_frame_ack_must_match_the_one_frame_in_flight():
     assert not camera_frame_acknowledged('not-json', 9)
 
 
-def test_camera_relay_pipelines_two_frames_before_waiting_for_ack():
+def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
     class Source:
         def __init__(self):
             self.sequence = 0
@@ -149,7 +149,7 @@ def test_camera_relay_pipelines_two_frames_before_waiting_for_ack():
         try:
             await asyncio.wait_for(websocket.two_sent.wait(), timeout=1.0)
             assert len(websocket.sent) == CAMERA_MAX_IN_FLIGHT
-            assert websocket.recv_counts_at_send == [1, 1]
+            assert websocket.recv_counts_at_send == [1] * CAMERA_MAX_IN_FLIGHT
         finally:
             task.cancel()
             with suppress(asyncio.CancelledError):

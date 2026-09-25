@@ -24,7 +24,10 @@ MAX_BUFFER_BYTES = 2_000_000
 CAMERA_FRAME_MAGIC = b'IDRC'
 CAMERA_FRAME_VERSION = 1
 CAMERA_FRAME_HEADER = struct.Struct('!4sBQQQ')
-CAMERA_MAX_IN_FLIGHT = 2
+# Keep a small bandwidth-delay window so WAN acknowledgement latency does not
+# throttle a 30 FPS source.  Frames are still bounded and the source retains
+# only its newest JPEG, so slow links cannot build an unbounded video queue.
+CAMERA_MAX_IN_FLIGHT = 8
 
 
 @dataclass(frozen=True)
