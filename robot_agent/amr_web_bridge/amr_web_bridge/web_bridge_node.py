@@ -790,7 +790,6 @@ class WebBridgeNode(Node):
             self.process_map_command_queue()
             self.process_localization_command_queue()
             self.run_localization_scan()
-            self.maybe_start_automatic_stall_recovery()
         if due('emergency_zero'):
             self.publish_emergency_zero()
         if due('physical_estop'):
@@ -3110,7 +3109,6 @@ class WebBridgeNode(Node):
         action = message.get('action')
         supported = {
             'navigation.recover',
-            'motor.reset_stall',
             'navigation.restart_if_broken',
             'system.start_navigation',
             'system.stop_navigation',
@@ -3160,8 +3158,6 @@ class WebBridgeNode(Node):
         try:
             if action == 'navigation.recover':
                 succeeded, detail = self.recover_navigation(command)
-            elif action == 'motor.reset_stall':
-                succeeded, detail = self.reset_motor_stall()
             elif action == 'navigation.restart_if_broken':
                 manager_available = (
                     self.navigation_lifecycle_client.service_is_ready()

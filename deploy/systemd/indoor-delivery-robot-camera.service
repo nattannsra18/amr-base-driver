@@ -12,7 +12,7 @@ Group=odroid
 SupplementaryGroups=video
 EnvironmentFile=/etc/indoor-delivery-robot/camera.env
 ExecStartPre=/usr/bin/test -e ${CAMERA_DEVICE}
-ExecStart=/usr/bin/ustreamer --device=${CAMERA_DEVICE} --format=MJPEG --encoder=HW --resolution=640x480 --desired-fps=30 --host=${CAMERA_HOST} --port=${CAMERA_PORT} --buffers=2 --workers=1 --tcp-nodelay --persistent --device-error-delay=2 --no-log-colors
+ExecStart=/usr/bin/ustreamer --device=${CAMERA_DEVICE} --format=MJPEG --encoder=HW --resolution=640x480 --desired-fps=30 --host=${CAMERA_HOST} --port=${CAMERA_PORT} --buffers=1 --workers=1 --tcp-nodelay --persistent --device-error-delay=2 --no-log-colors
 Restart=always
 RestartSec=3
 TimeoutStopSec=5

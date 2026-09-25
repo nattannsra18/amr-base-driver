@@ -222,7 +222,7 @@ flowchart LR
   fresh -- Yes --> relay["cmd_vel_passthrough"]
   relay --> safe["/cmd_vel_safe"]
   safe --> host{"Host checks"}
-  host -- "locked / stale telemetry / wheel fault" --> stop
+  host -- "motors disabled / stale telemetry" --> stop
   host -- Pass --> serial["UART wheel targets"]
   serial --> mcu{"ESP32 checks"}
   mcu -- "bad packet / watchdog / encoder stall" --> pwm0["PWM = 0<br/>fault latched"]
@@ -237,10 +237,14 @@ The base uses several layers of protection:
 1. A cold base launch defaults to `enable_motors:=false`; arm only after the
    physical area and telemetry are ready.
 2. Teleop has a dead-man timeout.
-3. The host motion guard compares the command with wheel feedback.
-4. The serial bridge refuses to arm with stale telemetry or an active fault.
-5. The ESP32 checks packets and stops after a 300 ms command timeout.
-6. The physical motor cutoff stays within reach during every attended test.
+3. The serial bridge refuses to arm with stale telemetry or an active MCU fault.
+4. The ESP32 checks packets and stops after a 300 ms command timeout.
+5. The physical motor cutoff stays within reach during every attended test.
+
+Wheel speed and encoder data remain visible in diagnostics and odometry, but
+the ODROID no longer infers or latches a motor fault from wheel feedback. This
+avoids false software locks; genuine MCU faults and stale telemetry still stop
+the drive.
 
 A software stop is useful, but it is not a replacement for a certified
 emergency stop.
@@ -292,7 +296,7 @@ caster.
 | `/odometry/filtered` | EKF output for SLAM and localization |
 | `/imu/data_raw` | Calibrated MPU6050 measurement |
 | `/joint_states` | Wheel state |
-| `/diagnostics` | Serial, MCU, motion, and sensor health |
+| `/diagnostics` | Serial, MCU, drive telemetry, and sensor health |
 
 | Interface | Purpose |
 |---|---|
@@ -434,8 +438,8 @@ a latched fault:
 ros2 service call /clear_motor_fault std_srvs/srv/Trigger '{}'
 ```
 
-Do not resume motion until `/diagnostics` reports `mcu_fault=0`, an empty
-`host_motion_fault`, fresh serial telemetry, and zero wheel motion.
+Do not resume motion until `/diagnostics` reports `mcu_fault=0`, fresh serial
+telemetry, and zero wheel motion.
 
 ## Firmware and UART
 
