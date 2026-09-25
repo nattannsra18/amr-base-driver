@@ -10,13 +10,15 @@ and the binary UART telemetry link consumed by `amr_base_driver`.
 - PWM is zero at boot.
 - The host must refresh wheel commands within 300 ms.
 - Invalid commands are rejected.
-- IMU, encoder-stall, and encoder-direction faults stop both motors and latch.
+- Repeated IMU read failures stop both motors and latch.
+- Encoder feedback remains visible in ROS wheel telemetry but does not latch or
+  lock the motors.
 - `CLEAR` only releases a fault while the requested wheel speeds are zero.
 - PWM, acceleration, and commanded RPM are bounded.
 
-Do not remove or bypass these guards during ordinary testing. A successful
-fixed-PWM bench sketch does not validate the closed-loop firmware under caster
-and floor load.
+Do not remove or bypass the command watchdog, explicit stop path, or bounded
+outputs during ordinary testing. A successful fixed-PWM bench sketch does not
+validate the closed-loop firmware under caster and floor load.
 
 ## Reproducible build
 
@@ -37,7 +39,7 @@ arduino-cli compile \
   firmware/esp32/robot_base_tb6612_mapping_v3_floor_start
 ```
 
-The 2026-09-20 verification used 317,963 bytes (24%) of flash and 24,640 bytes
+The 2026-09-26 verification used 317,511 bytes (24%) of flash and 24,608 bytes
 (7%) of dynamic memory.
 
 ## Flashing on the ODROID-C4
