@@ -7,7 +7,7 @@ readonly CONFIG_DIR="/etc/indoor-delivery-robot"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPOSITORY_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 CAMERA_DEVICE="/dev/v4l/by-id/usb-Generic_USB_Camera_200901010001-video-index0"
-CAMERA_HOST="100.67.28.7"
+CAMERA_HOST="127.0.0.1"
 CAMERA_PORT="8081"
 DRY_RUN=false
 NO_START=false
@@ -19,10 +19,10 @@ Install the low-latency 640x480 MJPEG camera service.
 Usage:
   sudo ./scripts/install_camera_stream.sh \
     [--device /dev/v4l/by-id/...-video-index0] \
-    [--host 100.67.28.7] [--port 8081] [--no-start] [--dry-run]
+    [--host 127.0.0.1] [--port 8081] [--no-start] [--dry-run]
 
-The host must already be assigned to this computer. Bind to a private
-Tailscale address so the raw camera port is not exposed to the LAN.
+The default loopback binding keeps the raw stream private. The outbound camera
+relay sends authenticated JPEG frames to the control plane over WSS.
 EOF
 }
 
@@ -55,7 +55,7 @@ done
 [[ -f "$REPOSITORY_ROOT/deploy/systemd/$SERVICE_NAME" ]] || fail "Service template was not found"
 [[ "$EUID" -eq 0 || "$DRY_RUN" == true ]] || fail "Run this installer with sudo, or use --dry-run"
 
-if ! "$DRY_RUN" && ! ip -brief address show | grep -Fq "$CAMERA_HOST"; then
+if ! "$DRY_RUN" && [[ "$CAMERA_HOST" != "127.0.0.1" ]] && ! ip -brief address show | grep -Fq "$CAMERA_HOST"; then
   fail "Camera host is not assigned to this computer: $CAMERA_HOST"
 fi
 

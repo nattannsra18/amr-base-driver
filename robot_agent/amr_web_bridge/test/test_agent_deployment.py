@@ -17,6 +17,22 @@ def test_systemd_service_starts_agent_from_external_profile_and_env():
     assert 'Restart=always' in service
     assert 'NoNewPrivileges=false' in service
     assert 'ReadWritePaths=/var/lib/indoor-delivery-robot' in service
+
+
+def test_camera_relay_is_separate_hardened_outbound_service():
+    service = (
+        PACKAGE_ROOT
+        / 'deploy'
+        / 'systemd'
+        / 'indoor-delivery-robot-camera-relay.service'
+    ).read_text(encoding='utf-8')
+    assert 'camera_relay' in service
+    assert 'EnvironmentFile=/etc/indoor-delivery-robot/agent.env' in service
+    assert 'User=indoor-robot' in service
+    assert 'NoNewPrivileges=true' in service
+    assert 'Restart=always' in service
+
+
 def test_deployment_environment_keeps_runtime_values_out_of_source():
     environment = (
         PACKAGE_ROOT / 'deploy' / 'robot-agent.env.example'
@@ -25,6 +41,7 @@ def test_deployment_environment_keeps_runtime_values_out_of_source():
     assert 'ROBOT_CREDENTIAL_FILE=/var/lib/' in environment
     assert 'replace-with-limited-bootstrap-secret' in environment
     assert 'ROBOT_WS_TOKEN' not in environment
+    assert 'CAMERA_LOCAL_STREAM_URL=http://127.0.0.1:8081/stream' in environment
 
 
 def test_installer_supports_secure_repeatable_deployment():
@@ -38,6 +55,7 @@ def test_installer_supports_secure_repeatable_deployment():
     assert 'ros2 pkg prefix' in installer
     assert 'import websockets, yaml' in installer
     assert 'systemctl enable' in installer
+    assert 'indoor-delivery-robot-camera-relay.service' in installer
     assert 'Robot Registry:' in installer
     assert 'Robot pairing required. Code:' in installer
     assert 'REPLACE-|CHANGE-ME|CHANGEME' in installer

@@ -1,0 +1,30 @@
+[Unit]
+Description=Indoor Delivery Robot Outbound Camera Relay
+Documentation=https://github.com/nattannsra18/amr-base-driver
+After=network-online.target indoor-delivery-robot-camera.service indoor-delivery-robot-agent.service
+Wants=network-online.target indoor-delivery-robot-camera.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=indoor-robot
+Group=indoor-robot
+EnvironmentFile=/etc/indoor-delivery-robot/agent.env
+ExecStart=/usr/bin/bash -lc 'source "/opt/ros/$ROS_DISTRO/setup.bash" && source "$ROBOT_WORKSPACE/setup.bash" && exec ros2 run amr_web_bridge camera_relay'
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryMax=128M
+CPUQuota=35%
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

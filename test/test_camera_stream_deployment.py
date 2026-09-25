@@ -20,11 +20,12 @@ def test_camera_stream_uses_hardware_mjpeg_outside_ros():
     assert 'CPUQuota=25%' in service
 
 
-def test_camera_installer_defaults_to_stable_private_endpoint():
+def test_camera_installer_defaults_to_loopback_for_outbound_relay():
     installer = (
         ROOT / 'scripts' / 'install_camera_stream.sh'
     ).read_text(encoding='utf-8')
     assert '/dev/v4l/by-id/' in installer
     assert '--dry-run' in installer
-    assert 'ip -brief address show' in installer
+    assert 'CAMERA_HOST="127.0.0.1"' in installer
+    assert 'outbound camera' in installer
     assert 'systemctl enable' in installer

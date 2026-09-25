@@ -151,7 +151,7 @@ sudo ./scripts/install_navigation_service.sh \
   --enable-motors
 ```
 
-### Private live camera stream
+### Outbound live camera stream
 
 The dashboard camera uses the webcam's hardware MJPEG output directly, without
 publishing video frames over ROS 2 or DDS. Install the lightweight boot service
@@ -159,14 +159,15 @@ on the ODROID after connecting the USB camera:
 
 ```bash
 sudo apt-get install ustreamer
-sudo ./scripts/install_camera_stream.sh --host "$(tailscale ip -4)"
+sudo ./scripts/install_camera_stream.sh
 ```
 
-The service captures 640x480 at 30 fps and listens only on the robot's private
-Tailscale address. The web proxy samples the latest frame instead of forwarding
-a growing MJPEG queue, preventing stale frames from accumulating on weak Wi-Fi.
-Configure the web server with
-`CAMERA_STREAM_URL=http://<tailscale-ip>:8081/stream`.
+The capture service produces 640x480 hardware MJPEG at 30 fps on loopback only.
+The Robot Agent installer also enables a separate camera relay, which sends at
+most 15 JPEG frames per second to the control plane over authenticated outbound
+WSS. The relay and server retain only the newest frame, preventing stale frames
+from accumulating on weak Wi-Fi. The robot needs only outbound HTTPS/WSS access;
+Tailscale and inbound camera ports are not required for normal operation.
 
 Optionally include `--map-yaml` during installation to set the first active
 map. Otherwise select a map in Map Management; the Agent saves it and starts

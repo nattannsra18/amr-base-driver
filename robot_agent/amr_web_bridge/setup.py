@@ -66,6 +66,10 @@ setup(
                 'fleet_agent_simulator = '
                 'amr_web_bridge.fleet_agent_simulator:main'
             ),
+            (
+                'camera_relay = '
+                'amr_web_bridge.camera_relay:main'
+            ),
         ],
     },
 )

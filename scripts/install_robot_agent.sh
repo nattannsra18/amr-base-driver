@@ -3,6 +3,7 @@
 set -Eeuo pipefail
 
 readonly SERVICE_NAME="indoor-delivery-robot-agent.service"
+readonly CAMERA_RELAY_SERVICE_NAME="indoor-delivery-robot-camera-relay.service"
 readonly SERVICE_USER="indoor-robot"
 readonly CONFIG_DIR="/etc/indoor-delivery-robot"
 readonly STATE_DIR="/var/lib/indoor-delivery-robot"
@@ -146,6 +147,7 @@ ENVIRONMENT_TMP="$BUILD_DIR/agent.env"
   printf 'ROBOT_PROFILE_FILE=%s/robot-agent.yaml\n' "$CONFIG_DIR"
   printf 'ROBOT_CREDENTIAL_FILE=%s/agent-credential.json\n' "$STATE_DIR"
   printf 'ROBOT_ENROLLMENT_TOKEN=%s\n' "$ENROLLMENT_TOKEN"
+  printf 'CAMERA_LOCAL_STREAM_URL=http://127.0.0.1:8081/stream\nCAMERA_RELAY_FPS=15\n'
   # Match the physical ROS stack's Fast DDS implementation. UDP-only transport
   # avoids cross-user shared-memory permissions while preserving ROS services.
   printf 'ROS_DISTRO=%s\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\nROS_DOMAIN_ID=0\nROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET\n' "$ROS_DISTRO_NAME"
@@ -153,6 +155,7 @@ ENVIRONMENT_TMP="$BUILD_DIR/agent.env"
 chmod 0600 "$ENVIRONMENT_TMP"
 run install -o root -g "$SERVICE_USER" -m 0640 "$ENVIRONMENT_TMP" "$CONFIG_DIR/agent.env"
 run install -o root -g root -m 0644 "$PACKAGE_ROOT/deploy/systemd/$SERVICE_NAME" "/etc/systemd/system/$SERVICE_NAME"
+run install -o root -g root -m 0644 "$PACKAGE_ROOT/deploy/systemd/$CAMERA_RELAY_SERVICE_NAME" "/etc/systemd/system/$CAMERA_RELAY_SERVICE_NAME"
 run install -o root -g root -m 0755 \
   "$REPOSITORY_ROOT/scripts/indoor-delivery-robot-control" \
   /usr/local/sbin/indoor-delivery-robot-control
@@ -163,7 +166,13 @@ run visudo -cf "$SUDOERS_TMP"
 run install -o root -g root -m 0440 "$SUDOERS_TMP" /etc/sudoers.d/indoor-delivery-robot-agent
 run systemctl daemon-reload
 run systemctl enable "$SERVICE_NAME"
-if "$NO_START"; then info "Installed without starting the service (--no-start)"; else run systemctl restart "$SERVICE_NAME"; fi
+run systemctl enable "$CAMERA_RELAY_SERVICE_NAME"
+if "$NO_START"; then
+  info "Installed without starting the services (--no-start)"
+else
+  run systemctl restart "$SERVICE_NAME"
+  run systemctl restart "$CAMERA_RELAY_SERVICE_NAME"
+fi
 
 printf '\nRobot Agent installation complete.\nRobot Registry: %s\nService status: sudo systemctl status %s\nLive logs: sudo journalctl -u %s -f\n' "$REGISTRY_URL" "$SERVICE_NAME" "$SERVICE_NAME"
 printf 'After pairing, remove ROBOT_ENROLLMENT_TOKEN from %s and restart the service.\n' "$CONFIG_DIR/agent.env"
