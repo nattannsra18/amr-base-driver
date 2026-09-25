@@ -231,9 +231,6 @@ def near_goal_bridge(distance=0.28, *, localized=True, faulted=False):
         },
         motor_fault_snapshot=lambda: {
             'mcu_fault': 2 if faulted else 0,
-            'host_motion_fault': 'LEFT_ENCODER_STALL' if faulted else '',
-            'host_motion_state': 'FAULT' if faulted else 'NORMAL',
-            'host_motion_reason': '',
             'motors_enabled': not faulted,
         },
     )

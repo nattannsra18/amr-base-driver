@@ -99,9 +99,8 @@ class SensorDashboard(Node):
             if status.name in {
                 'ESP32 base controller',
                 'ESP32 MCU fault',
-                'Host wheel feedback',
+                'Base drive telemetry',
                 'Base serial telemetry',
-                'Base recovery',
             }:
                 self.diagnostic = status
                 self.diagnostic_fields.update(

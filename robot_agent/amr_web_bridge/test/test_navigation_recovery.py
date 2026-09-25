@@ -4,7 +4,6 @@ import pytest
 
 from amr_web_bridge.navigation_recovery import (
     classify_plan_failure,
-    MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS,
     NavigationRecoveryRunner,
 )
 
@@ -93,52 +92,6 @@ def test_costmap_clear_targets_local_then_global():
     assert cleared is True
     assert calls[0][3] == '/local_costmap/clear_entirely_local_costmap'
     assert calls[1][3] == '/global_costmap/clear_entirely_global_costmap'
-
-
-def test_motor_fault_clear_uses_only_fixed_trigger_service():
-    calls = []
-
-    def run(arguments, **kwargs):
-        calls.append((arguments, kwargs))
-        return CompletedProcess(arguments, 0, stdout='success: true', stderr='')
-
-    cleared, _ = NavigationRecoveryRunner(run=run).clear_motor_fault()
-    assert cleared is True
-    assert calls[0][0] == [
-        'ros2', 'service', 'call', '/clear_motor_fault',
-        'std_srvs/srv/Trigger', '{}',
-    ]
-    assert calls[0][1]['timeout'] == MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS
-    assert MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS == 15.0
-
-
-def test_motor_fault_clear_accepts_jazzy_trigger_response_format():
-    def run(arguments, **_kwargs):
-        return CompletedProcess(
-            arguments,
-            0,
-            stdout='std_srvs.srv.Trigger_Response(success=True, message="cleared")',
-            stderr='',
-        )
-
-    cleared, _ = NavigationRecoveryRunner(run=run).clear_motor_fault()
-    assert cleared is True
-
-
-def test_finish_motor_recovery_uses_fixed_set_bool_service():
-    calls = []
-
-    def run(arguments, **kwargs):
-        calls.append((arguments, kwargs))
-        return CompletedProcess(arguments, 0, stdout='success: true', stderr='')
-
-    finished, _ = NavigationRecoveryRunner(run=run).finish_motor_recovery(True)
-    assert finished is True
-    assert calls[0][0] == [
-        'ros2', 'service', 'call', '/finish_motor_recovery',
-        'std_srvs/srv/SetBool', '{"data":true}',
-    ]
-    assert calls[0][1]['timeout'] == MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS
 
 
 def test_escape_behaviors_use_only_bounded_nav2_actions():

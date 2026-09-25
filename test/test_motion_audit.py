@@ -18,8 +18,7 @@ def test_audit_accepts_healthy_motion_and_matching_signs():
         event(1.0, '/cmd_vel_safe', {'linear_x': -0.06, 'angular_z': 0.0}),
         diagnostics(1.2, status('ESP32 MCU fault', mcu_fault='0')),
         diagnostics(1.2, status(
-            'Host wheel feedback', host_motion_state='NORMAL',
-            host_motion_reason='', target_left_rpm='-18',
+            'Base drive telemetry', target_left_rpm='-18',
             target_right_rpm='-18', measured_left_rpm='-17',
             measured_right_rpm='-18', encoder_left_delta='-12',
             encoder_right_delta='-13', requested_linear_mps='-0.06',
@@ -41,8 +40,7 @@ def test_audit_fails_fault_false_stall_stuck_command_and_reversed_yaw():
         diagnostics(1.8, status('Base command ownership', owner='STOPPED')),
         diagnostics(1.8, status('ESP32 MCU fault', mcu_fault='2')),
         diagnostics(1.8, status(
-            'Host wheel feedback', host_motion_state='PRE_STALL',
-            host_motion_reason='LEFT_NO_WHEEL_FEEDBACK',
+            'Base drive telemetry',
             target_left_rpm='12', target_right_rpm='12',
             measured_left_rpm='4', measured_right_rpm='4',
             encoder_left_delta='2', encoder_right_delta='2',
@@ -69,8 +67,7 @@ def test_mcu_stall_is_false_stall_when_encoder_still_moves():
     result = audit_events([
         diagnostics(1.0, status('ESP32 MCU fault', mcu_fault='3')),
         diagnostics(1.0, status(
-            'Host wheel feedback', host_motion_state='NORMAL',
-            host_motion_reason='', target_left_rpm='15',
+            'Base drive telemetry', target_left_rpm='15',
             target_right_rpm='15', measured_left_rpm='14',
             measured_right_rpm='12', encoder_left_delta='8',
             encoder_right_delta='7')),

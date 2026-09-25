@@ -139,37 +139,6 @@ class NavigationRecoveryRunner:
         )
         return succeeded, output
 
-    def clear_motor_fault(self) -> tuple[bool, str]:
-        ok, output = self._command([
-            'ros2', 'service', 'call',
-            '/clear_motor_fault',
-            'std_srvs/srv/Trigger', '{}',
-        ], timeout=MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS)
-        # ros2 CLI output differs between releases: Jazzy prints a Python
-        # dataclass representation (``success=True``), while other versions
-        # may print YAML (``success: true``). Both are the same successful
-        # Trigger response.
-        normalized = output.lower().replace(' ', '')
-        succeeded = ok and (
-            'success=true' in normalized
-            or 'success:true' in normalized
-        )
-        return succeeded, output
-
-    def finish_motor_recovery(self, success: bool) -> tuple[bool, str]:
-        ok, output = self._command([
-            'ros2', 'service', 'call',
-            '/finish_motor_recovery',
-            'std_srvs/srv/SetBool',
-            json.dumps({'data': bool(success)}, separators=(',', ':')),
-        ], timeout=MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS)
-        normalized = output.lower().replace(' ', '')
-        succeeded = ok and (
-            'success=true' in normalized
-            or 'success:true' in normalized
-        )
-        return succeeded, output
-
     def back_up(self, distance: float = 0.10) -> tuple[bool, str]:
         goal = {
             'target': {'x': abs(float(distance)), 'y': 0.0, 'z': 0.0},

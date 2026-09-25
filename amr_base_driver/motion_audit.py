@@ -83,9 +83,7 @@ def audit_events(events, *, command_timeout=0.6):
                         'command_age_s': round(age, 3),
                         'command': last_command,
                     })
-            elif name == 'Host wheel feedback':
-                state = values.get('host_motion_state', '')
-                reason = values.get('host_motion_reason', '')
+            elif name == 'Base drive telemetry':
                 left_target = abs(_number(values, 'target_left_rpm') or 0.0)
                 right_target = abs(_number(values, 'target_right_rpm') or 0.0)
                 left_measured = abs(
@@ -99,28 +97,15 @@ def audit_events(events, *, command_timeout=0.6):
                     left_target < 8.0 or left_measured >= 0.5 or left_delta > 0
                 ):
                     false_stalls.append({
-                        'time': timestamp, 'state': state,
+                        'time': timestamp,
                         'wheel': 'left', 'source': 'MCU'})
                 if active_mcu_stall == 3 and (
                     right_target < 8.0
                     or right_measured >= 0.5 or right_delta > 0
                 ):
                     false_stalls.append({
-                        'time': timestamp, 'state': state,
+                        'time': timestamp,
                         'wheel': 'right', 'source': 'MCU'})
-                if 'LEFT_NO_WHEEL_FEEDBACK' in reason and (
-                    left_target < 8.0 or left_measured >= 0.5 or left_delta > 0
-                ):
-                    false_stalls.append({
-                        'time': timestamp, 'state': state,
-                        'wheel': 'left', 'source': 'host'})
-                if 'RIGHT_NO_WHEEL_FEEDBACK' in reason and (
-                    right_target < 8.0
-                    or right_measured >= 0.5 or right_delta > 0
-                ):
-                    false_stalls.append({
-                        'time': timestamp, 'state': state,
-                        'wheel': 'right', 'source': 'host'})
 
                 requested_linear = _number(values, 'requested_linear_mps')
                 requested_angular = _number(values, 'requested_angular_rps')
