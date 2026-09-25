@@ -13,7 +13,7 @@ SupplementaryGroups=video
 EnvironmentFile=/etc/indoor-delivery-robot/camera.env
 ExecStartPre=/usr/bin/test -e ${CAMERA_DEVICE}
 ExecStartPre=-/usr/bin/v4l2-ctl --device=${CAMERA_DEVICE} --set-ctrl=exposure_dynamic_framerate=${CAMERA_DYNAMIC_FRAMERATE}
-ExecStart=/usr/bin/ustreamer --device=${CAMERA_DEVICE} --format=MJPEG --encoder=HW --resolution=640x480 --desired-fps=30 --host=${CAMERA_HOST} --port=${CAMERA_PORT} --buffers=1 --workers=1 --tcp-nodelay --persistent --device-error-delay=2 --no-log-colors
+ExecStart=/usr/bin/ustreamer --device=${CAMERA_DEVICE} --format=MJPEG --encoder=HW --resolution=${CAMERA_RESOLUTION} --desired-fps=30 --host=${CAMERA_HOST} --port=${CAMERA_PORT} --buffers=1 --workers=1 --tcp-nodelay --persistent --device-error-delay=2 --no-log-colors
 Restart=always
 RestartSec=3
 TimeoutStopSec=5

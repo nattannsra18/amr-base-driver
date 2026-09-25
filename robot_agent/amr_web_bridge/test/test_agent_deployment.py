@@ -47,10 +47,12 @@ def test_camera_capture_prioritizes_stable_low_latency_frames():
     ).read_text(encoding='utf-8')
     assert '--buffers=1' in service
     assert '--desired-fps=30' in service
+    assert '--resolution=${CAMERA_RESOLUTION}' in service
     assert 'exposure_dynamic_framerate=${CAMERA_DYNAMIC_FRAMERATE}' in service
     assert 'CPUQuota=' not in service
     assert 'Nice=0' in service
     assert 'CAMERA_DYNAMIC_FRAMERATE=0' in environment
+    assert 'CAMERA_RESOLUTION=352x288' in environment
 
 
 def test_deployment_environment_keeps_runtime_values_out_of_source():
