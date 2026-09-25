@@ -31,6 +31,26 @@ def test_camera_relay_is_separate_hardened_outbound_service():
     assert 'User=indoor-robot' in service
     assert 'NoNewPrivileges=true' in service
     assert 'Restart=always' in service
+    assert 'CPUQuota=' not in service
+    assert 'Nice=0' in service
+
+
+def test_camera_capture_prioritizes_stable_low_latency_frames():
+    service = (
+        PACKAGE_ROOT.parents[1]
+        / 'deploy'
+        / 'systemd'
+        / 'indoor-delivery-robot-camera.service'
+    ).read_text(encoding='utf-8')
+    environment = (
+        PACKAGE_ROOT.parents[1] / 'deploy' / 'camera.env.example'
+    ).read_text(encoding='utf-8')
+    assert '--buffers=1' in service
+    assert '--desired-fps=30' in service
+    assert 'exposure_dynamic_framerate=${CAMERA_DYNAMIC_FRAMERATE}' in service
+    assert 'CPUQuota=' not in service
+    assert 'Nice=0' in service
+    assert 'CAMERA_DYNAMIC_FRAMERATE=0' in environment
 
 
 def test_deployment_environment_keeps_runtime_values_out_of_source():
