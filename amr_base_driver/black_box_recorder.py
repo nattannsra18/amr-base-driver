@@ -190,7 +190,7 @@ class BlackBoxRecorder(Node):
             TFMessage, '/tf', self.record_tf, qos_profile_sensor_data)
         for node_name in (
             'map_server', 'amcl', 'controller_server', 'planner_server',
-            'smoother_server', 'velocity_smoother', 'collision_monitor',
+            'velocity_smoother', 'collision_monitor',
             'behavior_server', 'bt_navigator',
         ):
             self.create_subscription(
