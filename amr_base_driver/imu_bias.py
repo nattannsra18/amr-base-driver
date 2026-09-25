@@ -4,6 +4,7 @@ import math
 import statistics
 
 MAX_STATIONARY_GYRO_STD = 0.030
+MIN_STATIONARY_SAMPLES = 20
 
 
 class StationaryBias:
@@ -30,7 +31,8 @@ class StationaryBias:
         self.samples.append((now, tuple(gyro)))
         while self.samples and now - self.samples[0][0] > 5.0:
             self.samples.popleft()
-        if len(self.samples) < 60 or now-self.samples[0][0] < 4.8:
+        if (len(self.samples) < MIN_STATIONARY_SAMPLES or
+                now-self.samples[0][0] < 4.8):
             return list(self.bias)
         axes = list(zip(*(s[1] for s in self.samples)))
         # Live stationary probes have shown temperature-dependent axis noise

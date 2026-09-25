@@ -43,6 +43,13 @@ def test_learns_bias_with_current_stationary_z_axis_noise():
     assert b.ready
 
 
+def test_learns_bias_at_measured_robot_sample_rate():
+    b = StationaryBias()
+    for i in range(50):
+        b.update(i*.15, [.01, -.002, .02], 9.50, True)
+    assert b.ready
+
+
 def test_rejects_materially_unstable_stationary_window():
     b = StationaryBias()
     for i in range(200):
