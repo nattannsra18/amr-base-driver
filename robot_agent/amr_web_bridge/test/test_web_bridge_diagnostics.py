@@ -273,6 +273,63 @@ def test_pre_stall_is_resettable_before_fault_latch():
     assert bridge.resettable_wheel_fault(fault)
 
 
+def test_blocked_wheel_feedback_recovery_is_resettable_without_restart():
+    fault = {
+        'mcu_fault': 0,
+        'host_motion_fault': '',
+        'host_motion_state': 'RECOVERY_BLOCKED',
+        'host_motion_reason': 'LEFT_NO_WHEEL_FEEDBACK',
+    }
+
+    assert WebBridgeNode.resettable_wheel_fault(fault)
+
+
+def test_reset_motor_stall_clears_blocked_mapping_drive_without_motion():
+    bridge = make_bridge()
+    bridge.velocity_lock = threading.Lock()
+    bridge.latest_velocity = {
+        'linear_velocity': 0.0,
+        'angular_velocity': 0.0,
+    }
+    bridge.last_odom_monotonic = time.monotonic()
+    bridge.publish_zero_velocity = lambda: None
+    bridge.cancel_active_navigation_for_operation = lambda **_kwargs: None
+    message = diagnostics_message('ESP32 base controller', 'esp32-uart-c')
+    message.status[0].values = [
+        KeyValue(key='mcu_fault', value='0'),
+        KeyValue(key='host_motion_fault', value=''),
+        KeyValue(key='host_motion_state', value='RECOVERY_BLOCKED'),
+        KeyValue(
+            key='host_motion_reason',
+            value='LEFT_NO_WHEEL_FEEDBACK',
+        ),
+        KeyValue(key='motors_enabled', value='True'),
+    ]
+    bridge.diagnostics_callback(message)
+    calls = []
+
+    class Runner:
+        def clear_motor_fault(self):
+            calls.append('clear')
+            status = bridge.latest_diagnostics['statuses'][0]
+            status['values'] = [
+                {'key': 'mcu_fault', 'value': '0'},
+                {'key': 'host_motion_fault', 'value': ''},
+                {'key': 'host_motion_state', 'value': 'NORMAL'},
+                {'key': 'host_motion_reason', 'value': ''},
+                {'key': 'motors_enabled', 'value': 'True'},
+            ]
+            return True, 'STOP and CLEAR sent'
+
+    bridge.navigation_recovery_runner = Runner()
+
+    succeeded, detail = bridge.reset_motor_stall()
+
+    assert succeeded is True
+    assert calls == ['clear']
+    assert 'no navigation goal was active' in detail
+
+
 def test_reset_motor_stall_requires_stop_and_diagnostic_confirmation():
     bridge = make_bridge()
     bridge.velocity_lock = threading.Lock()

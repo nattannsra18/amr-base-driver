@@ -3293,17 +3293,17 @@ class WebBridgeNode(Node):
         host_fault = str(fault.get('host_motion_fault', '')).strip().upper()
         host_state = str(fault.get('host_motion_state', '')).strip().upper()
         host_reason = str(fault.get('host_motion_reason', '')).strip().upper()
-        return int(fault.get('mcu_fault', -1)) in {2, 3} or host_fault in {
+        wheel_feedback_reasons = {
             'LEFT_ENCODER_STALL',
             'RIGHT_ENCODER_STALL',
             'LEFT_NO_WHEEL_FEEDBACK',
             'RIGHT_NO_WHEEL_FEEDBACK',
-        } or (
-            host_state == 'PRE_STALL'
-            and host_reason in {
-                'LEFT_NO_WHEEL_FEEDBACK',
-                'RIGHT_NO_WHEEL_FEEDBACK',
-            }
+        }
+        return int(fault.get('mcu_fault', -1)) in {2, 3} or (
+            host_fault in wheel_feedback_reasons
+        ) or (
+            host_state in {'PRE_STALL', 'RECOVERY_BLOCKED', 'RECOVERY_FAILED'}
+            and host_reason in wheel_feedback_reasons
         )
 
     def maybe_start_automatic_stall_recovery(self) -> None:
@@ -3599,7 +3599,12 @@ class WebBridgeNode(Node):
         mcu_fault = int(fault['mcu_fault'])
         host_fault = str(fault['host_motion_fault'])
         host_state = str(fault.get('host_motion_state', ''))
-        if mcu_fault == 0 and not host_fault and host_state != 'PRE_STALL':
+        normalized_host_state = host_state.strip().upper()
+        if (
+            mcu_fault == 0
+            and not host_fault
+            and normalized_host_state in {'', 'NORMAL', 'VERIFYING_RECOVERY'}
+        ):
             return True, 'No motor stall is currently latched; motors remain enabled'
         if not self.resettable_wheel_fault(fault):
             return False, (
