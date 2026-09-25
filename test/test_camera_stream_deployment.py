@@ -12,6 +12,7 @@ def test_camera_stream_uses_hardware_mjpeg_outside_ros():
     assert '--encoder=HW' in service
     assert '--resolution=640x480' in service
     assert '--desired-fps=30' in service
+    assert '--buffers=1' in service
     assert '--tcp-nodelay' in service
     assert '--slowdown' not in service
     assert 'EnvironmentFile=/etc/indoor-delivery-robot/camera.env' in service

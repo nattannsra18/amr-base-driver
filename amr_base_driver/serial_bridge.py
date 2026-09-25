@@ -14,8 +14,6 @@ from rclpy.node import Node
 from sensor_msgs.msg import Imu, JointState
 from std_srvs.srv import Empty, SetBool, Trigger
 
-from .motion_guard import MotionGuard
-
 
 TELEMETRY_MAGIC = b'\x5a\xa5'
 TELEMETRY_FORMAT = '<HBBIIiihhhhhhhhhHBBH'
@@ -100,8 +98,6 @@ class SerialBridge(Node):
         self.wheel_linear_mps = 0.0
         self.wheel_angular_rps = 0.0
         self.imu_angular_z_rps = 0.0
-        self.motion_guard = MotionGuard()
-
         self.previous_left = None
         self.previous_right = None
         self.previous_mcu_ms = None
@@ -120,10 +116,6 @@ class SerialBridge(Node):
             SetBool, 'set_motors_enabled', self.set_motors_enabled)
         self.create_service(
             Trigger, 'clear_motor_fault', self.clear_motor_fault)
-        self.create_service(
-            SetBool, 'finish_motor_recovery', self.finish_motor_recovery)
-        self.create_service(
-            Trigger, 'block_motor_recovery', self.block_motor_recovery)
         # 50 Hz is well above the MCU telemetry rate and avoids waking the
         # Python executor 100 times per second just to receive EAGAIN.
         self.create_timer(0.02, self.io_tick)
@@ -151,50 +143,10 @@ class SerialBridge(Node):
         self.requested_angular = 0.0
         self.last_cmd_monotonic = 0.0
         self.write_line('STOP')
-        if self.motion_guard.pre_stall:
-            if not self.motion_guard.begin_recovery(time.monotonic()):
-                response.success = False
-                response.message = 'Pre-stall recovery is not available'
-                return response
-            response.success = True
-            response.message = (
-                'Pre-stall recovery authorized once; MCU fault was not cleared')
-            return response
-
-        self.motion_guard = MotionGuard()
         self.write_line('CLEAR')
         response.success = True
         response.message = (
             'STOP and CLEAR sent; verify diagnostics mcu_fault=0 before motion')
-        return response
-
-    def finish_motor_recovery(self, request, response):
-        """Commit the bounded pre-stall maneuver result."""
-        if not self.motion_guard.finish_recovery(bool(request.data)):
-            response.success = False
-            response.message = 'No pre-stall recovery is in progress'
-            return response
-        self.write_line('STOP')
-        response.success = True
-        response.message = (
-            'Recovery completed; wheel feedback must remain healthy to rearm'
-            if request.data else
-            'Recovery motion failed without claiming an ESP32 or wheel fault: '
-            f'{self.motion_guard.recovery_failed}'
-        )
-        return response
-
-    def block_motor_recovery(self, _request, response):
-        """Record a safety refusal without converting it into a motor fault."""
-        if not self.motion_guard.block_recovery():
-            response.success = False
-            response.message = 'No pre-stall recovery is pending'
-            return response
-        self.write_line('STOP')
-        response.success = True
-        response.message = (
-            'Recovery blocked by safety; no ESP32 or wheel fault was asserted'
-        )
         return response
 
     def set_motors_enabled(self, request, response):
@@ -222,8 +174,6 @@ class SerialBridge(Node):
             blockers.append(f'telemetry stale ({telemetry_age:.3f}s)')
         if self.mcu_fault:
             blockers.append(f'mcu_fault={self.mcu_fault}')
-        if self.motion_guard.blocks_motion:
-            blockers.append(f'host_fault={self.motion_guard.fault}')
         if blockers:
             self.motors_enabled = False
             response.success = False
@@ -311,9 +261,8 @@ class SerialBridge(Node):
         now = time.monotonic()
         fresh = now - self.last_cmd_monotonic <= self.cmd_timeout
         healthy = (now - self.last_telemetry_monotonic < 0.3 and
-                   self.mcu_fault == 0 and not self.motion_guard.blocks_motion)
+                   self.mcu_fault == 0)
         if not healthy:
-            self.motion_guard.command(now, [0.0, 0.0])
             self.target_left_rpm = 0.0
             self.target_right_rpm = 0.0
             self.write_line('STOP')
@@ -331,7 +280,6 @@ class SerialBridge(Node):
                 ratio = self.max_rpm / peak
                 left_rpm *= ratio
                 right_rpm *= ratio
-        self.motion_guard.command(now, [left_rpm, right_rpm])
         self.target_left_rpm = left_rpm
         self.target_right_rpm = right_rpm
         self.write_line(
@@ -390,23 +338,7 @@ class SerialBridge(Node):
         self.measured_right_rpm = right_rpm
 
         self.last_telemetry_monotonic = time.monotonic()
-        previous_fault = self.motion_guard.fault
-        previous_pre_stall = self.motion_guard.pre_stall
-        reason = self.motion_guard.sample(
-            self.last_telemetry_monotonic, [left_rpm, right_rpm])
-        if reason and not previous_fault:
-            self.write_line('STOP')
-            self.get_logger().error(f'Motors stopped: {reason}')
-        elif self.motion_guard.pre_stall and not previous_pre_stall:
-            self.write_line('STOP')
-            self.get_logger().warning(
-                'Motors paused before fault latch: '
-                f'{self.motion_guard.pre_stall}; waiting for one recovery attempt')
-        if (
-            reason
-            or self.motion_guard.pre_stall != previous_pre_stall
-            or self.mcu_fault != previous_mcu_fault
-        ):
+        if self.mcu_fault != previous_mcu_fault:
             self.diagnostic_tick()
         self.telemetry_count += 1
         if self.telemetry_count % self.telemetry_publish_divisor:
@@ -538,28 +470,12 @@ class SerialBridge(Node):
             KeyValue(key='imu_temperature_c', value=f'{self.temperature:.2f}'),
         ]
 
-        host = DiagnosticStatus()
-        host.name = 'Host wheel feedback'
-        host.hardware_id = 'odroid-motion-guard'
-        if self.motion_guard.fault:
-            host.level = DiagnosticStatus.ERROR
-            host.message = self.motion_guard.fault
-        elif self.motion_guard.pre_stall:
-            host.level = DiagnosticStatus.WARN
-            host.message = f'PRE_STALL: {self.motion_guard.pre_stall}'
-        elif self.motion_guard.recovery_in_progress:
-            host.level = DiagnosticStatus.WARN
-            host.message = 'Wheel feedback recovery in progress'
-        else:
-            host.level = DiagnosticStatus.OK
-            host.message = 'Wheel feedback healthy'
-        host.values = [
-            KeyValue(key='host_motion_fault', value=self.motion_guard.fault),
-            KeyValue(key='host_motion_state', value=self.motion_guard.state),
-            KeyValue(
-                key='host_motion_reason',
-                value=(self.motion_guard.pre_stall
-                       or self.motion_guard.recovery_reason)),
+        drive = DiagnosticStatus()
+        drive.name = 'Base drive telemetry'
+        drive.hardware_id = 'odroid-base-driver'
+        drive.level = DiagnosticStatus.OK
+        drive.message = 'Wheel telemetry available'
+        drive.values = [
             KeyValue(key='motors_enabled', value=str(self.motors_enabled)),
             KeyValue(
                 key='target_left_rpm', value=f'{self.target_left_rpm:.3f}'),
@@ -592,35 +508,9 @@ class SerialBridge(Node):
                 value=f'{self.imu_angular_z_rps:.4f}'),
         ]
 
-        recovery = DiagnosticStatus()
-        recovery.name = 'Base recovery'
-        recovery.hardware_id = 'odroid-recovery'
-        if self.motion_guard.recovery_failed:
-            recovery.level = DiagnosticStatus.ERROR
-            recovery.message = (
-                f'Recovery motion failed: {self.motion_guard.recovery_failed}'
-            )
-        elif self.motion_guard.recovery_blocked:
-            recovery.level = DiagnosticStatus.WARN
-            recovery.message = (
-                'RECOVERY_BLOCKED: no remaining maneuver passed safety checks'
-            )
-        else:
-            recovery.level = DiagnosticStatus.OK
-            recovery.message = 'No blocked recovery'
-        recovery.values = [
-            KeyValue(
-                key='recovery_blocked',
-                value=self.motion_guard.recovery_blocked,
-            ),
-            KeyValue(
-                key='recovery_failed',
-                value=self.motion_guard.recovery_failed,
-            ),
-        ]
         array = DiagnosticArray()
         array.header.stamp = self.get_clock().now().to_msg()
-        array.status = [serial, mcu, host, recovery]
+        array.status = [serial, mcu, drive]
         self.diag_pub.publish(array)
 
     def destroy_node(self):

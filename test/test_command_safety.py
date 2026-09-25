@@ -1,7 +1,6 @@
 import time
 from types import SimpleNamespace
 
-from amr_base_driver.motion_guard import MotionGuard
 from amr_base_driver.serial_bridge import SerialBridge
 
 
@@ -9,7 +8,7 @@ def state():
     sent = []
     obj = SimpleNamespace(last_cmd_monotonic=time.monotonic(), cmd_timeout=.25,
                           last_telemetry_monotonic=time.monotonic(), mcu_fault=0,
-                          motion_guard=MotionGuard(), motors_enabled=True,
+                          motors_enabled=True,
                           requested_linear=.05, requested_angular=0.0,
                           separation=.36094, radius=.032085, max_rpm=90,
                           command_sequence=0, serial_port=object(),
@@ -46,17 +45,15 @@ def test_normal_command_and_disabled_motor():
     assert sent[-1] == 'CMD,1,0.000,0.000'
 
 
-def test_clear_fault_forces_stop_before_clear_and_resets_host_guard():
+def test_clear_fault_forces_stop_before_clearing_mcu_fault():
     obj, sent = state()
     obj.mcu_fault = 2
-    obj.motion_guard.fault = 'LEFT_NO_WHEEL_FEEDBACK'
     response = SimpleNamespace(success=False, message='')
     result = SerialBridge.clear_motor_fault(obj, None, response)
     assert sent == ['STOP', 'CLEAR']
     assert obj.requested_linear == 0.0
     assert obj.requested_angular == 0.0
     assert obj.last_cmd_monotonic == 0.0
-    assert not obj.motion_guard.fault
     assert result.success
     assert 'mcu_fault=0' in result.message
 
