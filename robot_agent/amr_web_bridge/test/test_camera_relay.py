@@ -1,14 +1,20 @@
 """Tests for the low-latency outbound camera relay."""
 
+import asyncio
 import struct
+from contextlib import suppress
+from pathlib import Path
 
+import amr_web_bridge.camera_relay as camera_relay_module
 from amr_web_bridge.camera_relay import (
-    camera_frame_acknowledged,
     CAMERA_FRAME_HEADER,
     CAMERA_FRAME_MAGIC,
     CAMERA_FRAME_VERSION,
+    CAMERA_MAX_IN_FLIGHT,
+    CameraRelay,
     CapturedJpeg,
     LatestJpegSource,
+    camera_frame_acknowledged,
     pack_camera_frame,
 )
 
@@ -85,3 +91,69 @@ def test_camera_frame_ack_must_match_the_one_frame_in_flight():
         9,
     )
     assert not camera_frame_acknowledged('not-json', 9)
+
+
+def test_camera_relay_pipelines_two_frames_before_waiting_for_ack():
+    class Source:
+        def __init__(self):
+            self.sequence = 0
+
+        def wait_for_frame(self, _after_sequence, _timeout):
+            self.sequence += 1
+            return CapturedJpeg(
+                sequence=self.sequence,
+                captured_at_ns=self.sequence,
+                data=b'\xff\xd8frame\xff\xd9',
+            )
+
+    class WebSocket:
+        def __init__(self):
+            self.recv_calls = 0
+            self.sent = []
+            self.recv_counts_at_send = []
+            self.two_sent = asyncio.Event()
+
+        async def recv(self):
+            self.recv_calls += 1
+            if self.recv_calls == 1:
+                return '{"type":"camera_ready"}'
+            await asyncio.Future()
+
+        async def send(self, payload):
+            self.sent.append(payload)
+            self.recv_counts_at_send.append(self.recv_calls)
+            if len(self.sent) == CAMERA_MAX_IN_FLIGHT:
+                self.two_sent.set()
+
+    class Connection:
+        def __init__(self, websocket):
+            self.websocket = websocket
+
+        async def __aenter__(self):
+            return self.websocket
+
+        async def __aexit__(self, *_args):
+            return False
+
+    async def scenario():
+        websocket = WebSocket()
+        relay = CameraRelay('wss://example.test', Path('/tmp/unused'), '', 30)
+        relay.source = Source()
+        original_connect = camera_relay_module.websockets.connect
+        camera_relay_module.websockets.connect = (
+            lambda *_args, **_kwargs: Connection(websocket)
+        )
+        task = asyncio.create_task(
+            relay._publish('wss://example.test', 'secret')
+        )
+        try:
+            await asyncio.wait_for(websocket.two_sent.wait(), timeout=1.0)
+            assert len(websocket.sent) == CAMERA_MAX_IN_FLIGHT
+            assert websocket.recv_counts_at_send == [1, 1]
+        finally:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            camera_relay_module.websockets.connect = original_connect
+
+    asyncio.run(scenario())

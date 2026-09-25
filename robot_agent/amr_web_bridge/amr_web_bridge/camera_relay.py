@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import json
 import logging
 import os
-from pathlib import Path
 import struct
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass
+from pathlib import Path
 from urllib.request import urlopen
 
 import websockets
@@ -23,6 +24,7 @@ MAX_BUFFER_BYTES = 2_000_000
 CAMERA_FRAME_MAGIC = b'IDRC'
 CAMERA_FRAME_VERSION = 1
 CAMERA_FRAME_HEADER = struct.Struct('!4sBQQQ')
+CAMERA_MAX_IN_FLIGHT = 2
 
 
 @dataclass(frozen=True)
@@ -190,39 +192,47 @@ class CameraRelay:
             LOGGER.info('Camera relay connected: %s', uri)
             sequence = 0
             next_send = 0.0
+            pending_sequences: deque[int] = deque()
             while True:
-                result = await asyncio.to_thread(
-                    self.source.wait_for_frame,
-                    sequence,
-                    5.0,
-                )
-                if result is None:
-                    continue
-                sequence = result.sequence
-                frame = result
-                delay = next_send - time.monotonic()
-                if delay > 0:
-                    await asyncio.sleep(delay)
-                    newer = await asyncio.to_thread(
+                if len(pending_sequences) < CAMERA_MAX_IN_FLIGHT:
+                    result = await asyncio.to_thread(
                         self.source.wait_for_frame,
                         sequence,
-                        0.0,
+                        5.0 if not pending_sequences else self.frame_interval,
                     )
-                    if newer is not None:
-                        sequence = newer.sequence
-                        frame = newer
-                send_started = time.monotonic()
-                await websocket.send(pack_camera_frame(frame, time.time_ns()))
+                    if result is not None:
+                        sequence = result.sequence
+                        frame = result
+                        delay = next_send - time.monotonic()
+                        if delay > 0:
+                            await asyncio.sleep(delay)
+                            newer = await asyncio.to_thread(
+                                self.source.wait_for_frame,
+                                sequence,
+                                0.0,
+                            )
+                            if newer is not None:
+                                sequence = newer.sequence
+                                frame = newer
+                        send_started = time.monotonic()
+                        await websocket.send(
+                            pack_camera_frame(frame, time.time_ns())
+                        )
+                        pending_sequences.append(sequence)
+                        next_send = send_started + self.frame_interval
+                        continue
+                if not pending_sequences:
+                    continue
                 acknowledgement = await asyncio.wait_for(
                     websocket.recv(),
                     timeout=3.0,
                 )
                 if not camera_frame_acknowledged(
                     acknowledgement,
-                    sequence,
+                    pending_sequences[0],
                 ):
                     raise OSError('invalid camera frame acknowledgement')
-                next_send = send_started + self.frame_interval
+                pending_sequences.popleft()
 
 
 def main() -> None:
