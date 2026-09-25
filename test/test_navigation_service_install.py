@@ -12,8 +12,8 @@ def test_navigation_and_agent_installers_keep_dds_local_to_odroid():
         PACKAGE_ROOT / 'scripts' / 'install_robot_agent.sh'
     ).read_text(encoding='utf-8')
 
-    assert 'ROS_LOCALHOST_ONLY=1' in navigation
-    assert 'ROS_LOCALHOST_ONLY=1' in agent
+    assert 'ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST' in navigation
+    assert 'ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST' in agent
 
 
 def test_navigation_service_has_bounded_restart_policy():
