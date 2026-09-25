@@ -148,7 +148,7 @@ ENVIRONMENT_TMP="$BUILD_DIR/agent.env"
   printf 'ROBOT_ENROLLMENT_TOKEN=%s\n' "$ENROLLMENT_TOKEN"
   # Match the physical ROS stack's Fast DDS implementation. UDP-only transport
   # avoids cross-user shared-memory permissions while preserving ROS services.
-  printf 'ROS_DISTRO=%s\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\nROS_DOMAIN_ID=0\nROS_LOCALHOST_ONLY=1\n' "$ROS_DISTRO_NAME"
+  printf 'ROS_DISTRO=%s\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\nROS_DOMAIN_ID=0\nROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET\n' "$ROS_DISTRO_NAME"
 } > "$ENVIRONMENT_TMP"
 chmod 0600 "$ENVIRONMENT_TMP"
 run install -o root -g "$SERVICE_USER" -m 0640 "$ENVIRONMENT_TMP" "$CONFIG_DIR/agent.env"

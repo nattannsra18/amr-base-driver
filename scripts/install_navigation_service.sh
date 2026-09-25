@@ -78,9 +78,9 @@ trap cleanup EXIT
   # Keep every robot-side ROS process on the same transport. The Agent runs as
   # a separate service account, so UDP avoids Fast DDS shared-memory permission
   # boundaries while preserving lifecycle service discovery.
-  # Every ROS participant for this prototype runs on the ODROID. Keep DDS on
-  # loopback; the Robot Agent's WebSocket remains network-accessible.
-  printf 'ROS_DOMAIN_ID=0\nROS_LOCALHOST_ONLY=1\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\n'
+  # SUBNET permits late-joining diagnostic clients. Fast DDS localhost-only
+  # discovery was unreliable on this Jazzy/ODROID image.
+  printf 'ROS_DOMAIN_ID=0\nROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\n'
 } > "$ENV_FILE"
 
 info "Installing the navigation boot service"

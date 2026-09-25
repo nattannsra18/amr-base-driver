@@ -115,10 +115,11 @@ ros2 run amr_web_bridge web_bridge_node --ros-args \
 ```
 
 The systemd Agent and navigation stack use the same Fast DDS implementation
-with UDP-only, localhost-scoped transport. ROS stays inside the ODROID while
-the Agent's WebSocket remains the authenticated network boundary. This also
-avoids cross-user shared-memory permissions and unnecessary LAN discovery. The
-installer grants the Agent a narrow ACL for the configured map
+with UDP-only subnet discovery. Runtime control stays on the ODROID while the
+Agent's WebSocket remains the authenticated control-plane boundary. Subnet
+discovery is retained because late-joining diagnostics were unreliable with
+Fast DDS localhost-only discovery on the physical Jazzy image. The installer
+grants the Agent a narrow ACL for the configured map
 directory so map catalogs and map-management operations remain available.
 
 For ODROID service installation, use the included installer. It builds a
