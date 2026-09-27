@@ -62,6 +62,18 @@ def camera_frame_acknowledged(message: object, sequence: int) -> bool:
     )
 
 
+def camera_stream_requested(message: object) -> bool | None:
+    """Return a server demand update, or None for another message type."""
+    try:
+        payload = json.loads(str(message))
+    except (TypeError, ValueError):
+        return None
+    if payload.get('type') not in {'camera_ready', 'camera_demand'}:
+        return None
+    requested = payload.get('stream_requested')
+    return requested if isinstance(requested, bool) else None
+
+
 class LatestJpegSource:
     """Continuously decode an MJPEG byte stream while retaining one frame."""
 
@@ -71,6 +83,8 @@ class LatestJpegSource:
         self.frame: CapturedJpeg | None = None
         self.sequence = 0
         self.stopped = threading.Event()
+        self.active = threading.Event()
+        self.active.set()
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -81,6 +95,15 @@ class LatestJpegSource:
 
     def stop(self) -> None:
         self.stopped.set()
+        self.active.set()
+        with self.condition:
+            self.condition.notify_all()
+
+    def set_active(self, active: bool) -> None:
+        if active:
+            self.active.set()
+        else:
+            self.active.clear()
         with self.condition:
             self.condition.notify_all()
 
@@ -101,6 +124,8 @@ class LatestJpegSource:
 
     def _run(self) -> None:
         while not self.stopped.is_set():
+            if not self.active.wait(timeout=1.0):
+                continue
             try:
                 with urlopen(self.url, timeout=10) as stream:
                     LOGGER.info('Reading local camera stream: %s', self.url)
@@ -112,7 +137,7 @@ class LatestJpegSource:
 
     def _read_stream(self, stream) -> None:
         buffer = bytearray()
-        while not self.stopped.is_set():
+        while not self.stopped.is_set() and self.active.is_set():
             chunk = stream.read(16_384)
             if not chunk:
                 raise OSError('camera stream ended')
@@ -158,6 +183,7 @@ class CameraRelay:
         self.frame_interval = 1.0 / max(1.0, min(max_fps, 30.0))
 
     async def run(self) -> None:
+        self.source.set_active(False)
         self.source.start()
         try:
             while True:
@@ -168,7 +194,7 @@ class CameraRelay:
                     continue
                 uri = (
                     f'{self.server_url}/ws/robots/'
-                    f'{credential.robot_id}/camera'
+                    f'{credential.robot_id}/camera?demand_control=1'
                 )
                 try:
                     await self._publish(uri, credential.credential)
@@ -193,10 +219,23 @@ class CameraRelay:
             if 'camera_ready' not in str(ready):
                 raise OSError('control plane rejected the camera handshake')
             LOGGER.info('Camera relay connected: %s', uri)
+            stream_requested = camera_stream_requested(ready)
+            # Preserve always-on behavior with older control planes during a
+            # rolling deployment.
+            if stream_requested is None:
+                stream_requested = True
+            self.source.set_active(stream_requested)
             sequence = 0
             next_send = 0.0
             pending_sequences: deque[int] = deque()
             while True:
+                if not stream_requested:
+                    control = await websocket.recv()
+                    demand = camera_stream_requested(control)
+                    if demand is not None:
+                        stream_requested = demand
+                        self.source.set_active(demand)
+                    continue
                 if len(pending_sequences) < CAMERA_MAX_IN_FLIGHT:
                     result = await asyncio.to_thread(
                         self.source.wait_for_frame,
@@ -230,6 +269,13 @@ class CameraRelay:
                     websocket.recv(),
                     timeout=3.0,
                 )
+                demand = camera_stream_requested(acknowledgement)
+                if demand is not None:
+                    stream_requested = demand
+                    self.source.set_active(demand)
+                    if not demand:
+                        pending_sequences.clear()
+                    continue
                 if not camera_frame_acknowledged(
                     acknowledgement,
                     pending_sequences[0],

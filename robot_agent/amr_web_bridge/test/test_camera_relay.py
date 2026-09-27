@@ -15,6 +15,7 @@ from amr_web_bridge.camera_relay import (
     CapturedJpeg,
     LatestJpegSource,
     camera_frame_acknowledged,
+    camera_stream_requested,
     pack_camera_frame,
 )
 
@@ -93,10 +94,26 @@ def test_camera_frame_ack_must_match_the_one_frame_in_flight():
     assert not camera_frame_acknowledged('not-json', 9)
 
 
+def test_camera_demand_messages_control_local_capture():
+    assert camera_stream_requested(
+        '{"type":"camera_ready","stream_requested":false}'
+    ) is False
+    assert camera_stream_requested(
+        '{"type":"camera_demand","stream_requested":true}'
+    ) is True
+    assert camera_stream_requested(
+        '{"type":"camera_frame_ack","source_sequence":1}'
+    ) is None
+
+
 def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
     class Source:
         def __init__(self):
             self.sequence = 0
+            self.active = None
+
+        def set_active(self, active):
+            self.active = active
 
         def wait_for_frame(self, _after_sequence, _timeout):
             self.sequence += 1
@@ -150,6 +167,7 @@ def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
             await asyncio.wait_for(websocket.two_sent.wait(), timeout=1.0)
             assert len(websocket.sent) == CAMERA_MAX_IN_FLIGHT
             assert websocket.recv_counts_at_send == [1] * CAMERA_MAX_IN_FLIGHT
+            assert relay.source.active is True
         finally:
             task.cancel()
             with suppress(asyncio.CancelledError):
