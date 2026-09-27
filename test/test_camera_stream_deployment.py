@@ -10,14 +10,14 @@ def test_camera_stream_uses_hardware_mjpeg_outside_ros():
     ).read_text(encoding='utf-8')
     assert '--format=MJPEG' in service
     assert '--encoder=HW' in service
-    assert '--resolution=640x480' in service
+    assert '--resolution=${CAMERA_RESOLUTION}' in service
     assert '--desired-fps=30' in service
     assert '--buffers=1' in service
     assert '--tcp-nodelay' in service
     assert '--slowdown' not in service
     assert 'EnvironmentFile=/etc/indoor-delivery-robot/camera.env' in service
     assert 'ros2' not in service.lower()
-    assert 'CPUQuota=25%' in service
+    assert 'CPUQuota=' not in service
 
 
 def test_camera_installer_defaults_to_loopback_for_outbound_relay():
@@ -27,5 +27,6 @@ def test_camera_installer_defaults_to_loopback_for_outbound_relay():
     assert '/dev/v4l/by-id/' in installer
     assert '--dry-run' in installer
     assert 'CAMERA_HOST="127.0.0.1"' in installer
+    assert 'CAMERA_RESOLUTION="352x288"' in installer
     assert 'outbound camera' in installer
     assert 'systemctl enable' in installer

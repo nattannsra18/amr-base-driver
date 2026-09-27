@@ -22,7 +22,6 @@
 */
 #include <Arduino.h>
 #include <Wire.h>
-#include "DirectionMonitor.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -90,16 +89,11 @@ constexpr uint32_t IMU_MS = 10;
 // 20 Hz leaves generous UART headroom while remaining fast enough for EKF.
 constexpr uint32_t TELEMETRY_MS = 50;
 constexpr uint32_t COMMAND_WATCHDOG_MS = 300;
-constexpr uint32_t ENCODER_STALL_MS = 600;
-constexpr uint32_t STALL_GRACE_MS = 1200;
 constexpr uint8_t IMU_FAILURE_LIMIT = 10;
 
 enum FaultCode : uint8_t {
   FAULT_NONE = 0,
   FAULT_IMU = 1,
-  FAULT_LEFT_ENCODER = 2,
-  FAULT_RIGHT_ENCODER = 3,
-  FAULT_ENCODER_DIRECTION = 4,
 };
 
 struct EncoderSample {
@@ -182,8 +176,6 @@ bool commandSeen = false;
 bool watchdogTripped = false;
 uint8_t consecutiveImuFailures = 0;
 FaultCode faultCode = FAULT_NONE;
-DirectionMonitor leftDirectionMonitor, rightDirectionMonitor;
-
 float requestedLeftRpm = 0;
 float requestedRightRpm = 0;
 uint32_t lastCommandMs = 0;
@@ -253,8 +245,6 @@ void setWheelPins(bool left, int direction) {
 }
 
 void stopMotors() {
-  leftDirectionMonitor = {};
-  rightDirectionMonitor = {};
   if (pwmReady) {
     ledcWrite(LEFT_ENA, 0);
     ledcWrite(RIGHT_ENB, 0);
@@ -475,9 +465,12 @@ void updateControl() {
                   (LEFT_CPR * dt);
   rightWheel.rpm = float(current.right - previousEncoder.right) * 60.0f /
                    (RIGHT_CPR * dt);
-  if (current.la != previousEncoder.la || current.lb != previousEncoder.lb)
+  // The accumulated ISR count is the source of truth for wheel movement.
+  // Sampling the A/B pin states here can miss complete quadrature cycles and
+  // falsely report a stationary encoder even while the wheel is moving.
+  if (current.left != previousEncoder.left)
     lastLeftEdgeMs = now;
-  if (current.ra != previousEncoder.ra || current.rb != previousEncoder.rb)
+  if (current.right != previousEncoder.right)
     lastRightEdgeMs = now;
   previousEncoder = current;
 
@@ -496,9 +489,9 @@ void updateControl() {
 
   const bool leftMoving = fabsf(requestedLeftRpm) >= 20.0f;
   const bool rightMoving = fabsf(requestedRightRpm) >= 20.0f;
-  // Recover once from a short loss of wheel momentum before declaring a hard
-  // stall. Resetting the wheel-local grace timestamp keeps the retry bounded;
-  // if encoder edges still do not return, the normal fault path below wins.
+  // Recover once from a short loss of wheel momentum. Encoder feedback no
+  // longer latches a motor fault; command freshness and explicit STOP remain
+  // the motion safety boundary.
   if (leftMoving &&
       now - leftMotionCommandMs > START_BOOST_MS &&
       now - lastLeftEdgeMs > RECOVERY_TRIGGER_MS &&
@@ -517,18 +510,6 @@ void updateControl() {
     rightWheel.boostUntilMs = now + RECOVERY_BOOST_MS;
     rightMotionCommandMs = now;
   }
-  if (leftMoving && now - leftMotionCommandMs > STALL_GRACE_MS) {
-    if (now - lastLeftEdgeMs > ENCODER_STALL_MS)
-      return latchFault(FAULT_LEFT_ENCODER, "LEFT_ENCODER_STALL");
-  }
-  if (rightMoving && now - rightMotionCommandMs > STALL_GRACE_MS) {
-    if (now - lastRightEdgeMs > ENCODER_STALL_MS)
-      return latchFault(FAULT_RIGHT_ENCODER, "RIGHT_ENCODER_STALL");
-  }
-  if (leftDirectionMonitor.check(now, requestedLeftRpm, leftWheel.rpm) ||
-      rightDirectionMonitor.check(now, requestedRightRpm, rightWheel.rpm))
-    return latchFault(FAULT_ENCODER_DIRECTION, "ENCODER_DIRECTION");
-
   updateWheel(leftWheel, true, requestedLeftRpm, LEFT_FF_AT_80, dt);
   updateWheel(rightWheel, false, requestedRightRpm, RIGHT_FF_AT_80, dt);
 }

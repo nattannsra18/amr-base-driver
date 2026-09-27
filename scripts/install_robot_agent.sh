@@ -147,7 +147,7 @@ ENVIRONMENT_TMP="$BUILD_DIR/agent.env"
   printf 'ROBOT_PROFILE_FILE=%s/robot-agent.yaml\n' "$CONFIG_DIR"
   printf 'ROBOT_CREDENTIAL_FILE=%s/agent-credential.json\n' "$STATE_DIR"
   printf 'ROBOT_ENROLLMENT_TOKEN=%s\n' "$ENROLLMENT_TOKEN"
-  printf 'CAMERA_LOCAL_STREAM_URL=http://127.0.0.1:8081/stream\nCAMERA_RELAY_FPS=15\n'
+  printf 'CAMERA_LOCAL_STREAM_URL=http://127.0.0.1:8081/stream\nCAMERA_RELAY_FPS=30\n'
   # Match the physical ROS stack's Fast DDS implementation. UDP-only transport
   # avoids cross-user shared-memory permissions while preserving ROS services.
   printf 'ROS_DISTRO=%s\nRMW_IMPLEMENTATION=rmw_fastrtps_cpp\nFASTDDS_BUILTIN_TRANSPORTS=UDPv4\nROS_DOMAIN_ID=0\nROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET\n' "$ROS_DISTRO_NAME"

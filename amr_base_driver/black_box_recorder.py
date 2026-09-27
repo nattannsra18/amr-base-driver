@@ -190,7 +190,7 @@ class BlackBoxRecorder(Node):
             TFMessage, '/tf', self.record_tf, qos_profile_sensor_data)
         for node_name in (
             'map_server', 'amcl', 'controller_server', 'planner_server',
-            'smoother_server', 'velocity_smoother', 'collision_monitor',
+            'velocity_smoother', 'collision_monitor',
             'behavior_server', 'bt_navigator',
         ):
             self.create_subscription(
@@ -204,7 +204,10 @@ class BlackBoxRecorder(Node):
         self.diagnostics = self.create_publisher(
             DiagnosticArray, '/diagnostics', 10)
         self.create_timer(1.0, self.record_host_health)
-        self.create_timer(5.0, self.publish_health)
+        # The Robot Agent marks a diagnostic stale after three seconds.  A
+        # one-second heartbeat leaves enough scheduling margin on the ODROID
+        # under SLAM/Nav2 load and prevents the status from oscillating.
+        self.create_timer(1.0, self.publish_health)
         self.record('session', {'event': 'started'}, force=True)
 
     def record(self, stream, data, *, force=False):

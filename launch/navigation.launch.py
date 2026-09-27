@@ -53,14 +53,6 @@ def generate_launch_description():
         condition=IfCondition(start_navigation),
         parameters=common_parameters,
     )
-    smoother = Node(
-        package='nav2_smoother',
-        executable='smoother_server',
-        name='smoother_server',
-        output='screen',
-        condition=IfCondition(start_navigation),
-        parameters=common_parameters,
-    )
     velocity_smoother = Node(
         package='nav2_velocity_smoother',
         executable='velocity_smoother',
@@ -118,7 +110,6 @@ def generate_launch_description():
             'node_names': [
                 'controller_server',
                 'planner_server',
-                'smoother_server',
                 'velocity_smoother',
                 'collision_monitor',
                 'behavior_server',
@@ -150,7 +141,6 @@ def generate_launch_description():
     navigation_processes = GroupAction(actions=[
         controller,
         planner,
-        smoother,
         velocity_smoother,
         collision_monitor,
         behavior_server,

@@ -20,6 +20,7 @@ from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from lifecycle_msgs.srv import GetState
 from nav2_msgs.action import ComputePathToPose, NavigateToPose, Spin
+from nav2_msgs.msg import SpeedLimit
 from nav2_msgs.srv import ClearEntireCostmap, LoadMap, ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 import rclpy
@@ -683,6 +684,11 @@ class WebBridgeNode(Node):
         self.initial_pose_publisher = self.create_publisher(
             PoseWithCovarianceStamped,
             self.initial_pose_topic,
+            10,
+        )
+        self.navigation_speed_limit_publisher = self.create_publisher(
+            SpeedLimit,
+            '/speed_limit',
             10,
         )
         self.periodic_intervals = {
@@ -4056,6 +4062,13 @@ class WebBridgeNode(Node):
             and isinstance(target.get('y'), (int, float))
             and isinstance(target.get('yaw'), (int, float))
         )
+        max_linear_speed = message.get('max_linear_speed', 0.10)
+        valid_speed = (
+            isinstance(max_linear_speed, (int, float))
+            and not isinstance(max_linear_speed, bool)
+            and math.isfinite(float(max_linear_speed))
+            and 0.08 <= float(max_linear_speed) <= 0.30
+        )
         valid_command = (
             isinstance(command_id, str)
             and bool(command_id)
@@ -4064,6 +4077,7 @@ class WebBridgeNode(Node):
             and bool(task_id)
             and stage in {'pickup', 'destination'}
             and valid_target
+            and valid_speed
         )
 
         if not valid_command:
@@ -4964,6 +4978,9 @@ class WebBridgeNode(Node):
             self.clear_active_command(command_id)
             return
 
+        self.publish_navigation_speed_limit(
+            float(command.get('max_linear_speed', 0.10))
+        )
         goal = self.build_navigation_goal(command)
         command['_navigation_started_monotonic'] = time.monotonic()
         self.get_logger().info(
@@ -5006,6 +5023,20 @@ class WebBridgeNode(Node):
         goal.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal.pose.pose.orientation.w = math.cos(yaw / 2.0)
         return goal
+
+    def publish_navigation_speed_limit(self, speed: float) -> None:
+        """Apply the server-validated per-delivery Nav2 speed ceiling."""
+        publisher = getattr(self, 'navigation_speed_limit_publisher', None)
+        if publisher is None:
+            return
+        message = SpeedLimit()
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.percentage = False
+        message.speed_limit = min(0.30, max(0.08, float(speed)))
+        publisher.publish(message)
+        self.get_logger().info(
+            f'Applied Nav2 speed limit {message.speed_limit:.2f} m/s'
+        )
 
     def goal_response_callback(
         self,
