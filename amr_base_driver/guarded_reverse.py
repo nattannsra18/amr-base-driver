@@ -24,6 +24,9 @@ FOOTPRINT_MAX_Y = 0.190
 FOOTPRINT_PADDING = 0.020
 LIDAR_X = -0.042
 LIDAR_Y = -0.005
+DEFAULT_WHEEL_SEPARATION = 0.36094
+DEFAULT_ARC_YAW = 0.22
+DEFAULT_ARC_DISTANCE = 0.5 * DEFAULT_WHEEL_SEPARATION * DEFAULT_ARC_YAW
 
 
 def adjacent_cluster_clearance(samples, *, beam_count=None):
@@ -71,6 +74,33 @@ def robust_rear_clearance(
         values,
         beam_count=len(ranges),
     )
+    return 0.0 if clearance is None else clearance
+
+
+def robust_front_clearance(
+    ranges,
+    *,
+    angle_min,
+    angle_increment,
+    range_min,
+    range_max,
+):
+    """Return the nearest adjacent-beam obstacle cluster ahead of the robot."""
+    values = []
+    for index, raw_range in enumerate(ranges):
+        distance = float(raw_range)
+        if (
+            not math.isfinite(distance)
+            or not range_min <= distance <= range_max
+        ):
+            continue
+        angle = math.atan2(
+            math.sin(angle_min + index * angle_increment),
+            math.cos(angle_min + index * angle_increment),
+        )
+        if abs(math.degrees(angle)) <= 30.0:
+            values.append((index, distance))
+    clearance = adjacent_cluster_clearance(values, beam_count=len(ranges))
     return 0.0 if clearance is None else clearance
 
 
@@ -167,7 +197,8 @@ def swept_arc_obstacle_distance(
     range_min,
     range_max,
     turn_direction,
-    arc_speed=0.05,
+    motion_direction=-1,
+    arc_speed=0.07,
     arc_turn_rate=0.28,
     arc_yaw=0.22,
 ):
@@ -181,11 +212,13 @@ def swept_arc_obstacle_distance(
     """
     if turn_direction not in (-1, 1):
         raise ValueError('turn_direction must be -1 or 1')
+    if motion_direction not in (-1, 1):
+        raise ValueError('motion_direction must be -1 or 1')
     speed = max(0.001, abs(float(arc_speed)))
     turn_rate = max(0.001, abs(float(arc_turn_rate)))
     target_yaw = max(0.01, abs(float(arc_yaw)))
     angular_velocity = turn_direction * turn_rate
-    linear_velocity = -speed
+    linear_velocity = motion_direction * speed
     radius = linear_velocity / angular_velocity
     steps = max(6, int(math.ceil(target_yaw / 0.02)))
     poses = []
@@ -208,6 +241,26 @@ def swept_arc_obstacle_distance(
         angle = angle_min + index * angle_increment
         point_x = LIDAR_X + distance * math.cos(angle)
         point_y = LIDAR_Y + distance * math.sin(angle)
+        inside_physical_footprint = (
+            FOOTPRINT_MIN_X <= point_x <= FOOTPRINT_MAX_X
+            and FOOTPRINT_MIN_Y <= point_y <= FOOTPRINT_MAX_Y
+        )
+        inside_padded_footprint = (
+            FOOTPRINT_MIN_X - FOOTPRINT_PADDING
+            <= point_x
+            <= FOOTPRINT_MAX_X + FOOTPRINT_PADDING
+            and FOOTPRINT_MIN_Y - FOOTPRINT_PADDING
+            <= point_y
+            <= FOOTPRINT_MAX_Y + FOOTPRINT_PADDING
+        )
+        initial_padding_penetration = None
+        if inside_padded_footprint and not inside_physical_footprint:
+            initial_padding_penetration = min(
+                point_x - (FOOTPRINT_MIN_X - FOOTPRINT_PADDING),
+                FOOTPRINT_MAX_X + FOOTPRINT_PADDING - point_x,
+                point_y - (FOOTPRINT_MIN_Y - FOOTPRINT_PADDING),
+                FOOTPRINT_MAX_Y + FOOTPRINT_PADDING - point_y,
+            )
         for pose_x, pose_y, pose_yaw in poses:
             cosine = math.cos(pose_yaw)
             sine = math.sin(pose_yaw)
@@ -227,12 +280,84 @@ def swept_arc_obstacle_distance(
                 <= relative_y
                 <= FOOTPRINT_MAX_Y + FOOTPRINT_PADDING
             ):
+                padding_penetration = min(
+                    relative_x - (FOOTPRINT_MIN_X - FOOTPRINT_PADDING),
+                    FOOTPRINT_MAX_X + FOOTPRINT_PADDING - relative_x,
+                    relative_y - (FOOTPRINT_MIN_Y - FOOTPRINT_PADDING),
+                    FOOTPRINT_MAX_Y + FOOTPRINT_PADDING - relative_y,
+                )
+                # A return may already overlap only the safety padding. Allow
+                # an arc that continuously moves away from that return, while
+                # still rejecting the opposite arc that moves any deeper.
+                if (
+                    initial_padding_penetration is not None
+                    and padding_penetration
+                    <= initial_padding_penetration + 1e-6
+                ):
+                    continue
                 collisions.append((index, distance))
                 break
     return adjacent_cluster_clearance(
         collisions,
         beam_count=len(ranges),
     )
+
+
+def swept_straight_obstacle_distance(
+    ranges,
+    *,
+    angle_min,
+    angle_increment,
+    range_min,
+    range_max,
+    motion_direction,
+    distance=0.10,
+):
+    """Return a clustered obstacle intersecting a straight footprint sweep."""
+    if motion_direction not in (-1, 1):
+        raise ValueError('motion_direction must be -1 or 1')
+    target_distance = max(0.01, abs(float(distance)))
+    steps = max(6, int(math.ceil(target_distance / 0.01)))
+    poses_x = [
+        motion_direction * target_distance * step / steps
+        for step in range(1, steps + 1)
+    ]
+    collisions = []
+    for index, raw_range in enumerate(ranges):
+        measured_range = float(raw_range)
+        if (
+            not math.isfinite(measured_range)
+            or not range_min <= measured_range <= range_max
+        ):
+            continue
+        angle = angle_min + index * angle_increment
+        point_x = LIDAR_X + measured_range * math.cos(angle)
+        point_y = LIDAR_Y + measured_range * math.sin(angle)
+        inside_current_footprint = (
+            FOOTPRINT_MIN_X - FOOTPRINT_PADDING
+            <= point_x
+            <= FOOTPRINT_MAX_X + FOOTPRINT_PADDING
+            and FOOTPRINT_MIN_Y - FOOTPRINT_PADDING
+            <= point_y
+            <= FOOTPRINT_MAX_Y + FOOTPRINT_PADDING
+        )
+        # A close point can already lie inside the padded footprint at the
+        # opposite end of the chassis.  Moving away makes that overlap shrink;
+        # it must not falsely block the escape direction.
+        if inside_current_footprint and motion_direction * point_x < 0.0:
+            continue
+        for pose_x in poses_x:
+            if (
+                FOOTPRINT_MIN_X - FOOTPRINT_PADDING
+                <= point_x - pose_x
+                <= FOOTPRINT_MAX_X + FOOTPRINT_PADDING
+                and FOOTPRINT_MIN_Y - FOOTPRINT_PADDING
+                <= point_y
+                <= FOOTPRINT_MAX_Y + FOOTPRINT_PADDING
+            ):
+                collisions.append((index, measured_range))
+                break
+    return adjacent_cluster_clearance(collisions, beam_count=len(ranges))
 
 
 def normalize_angle(angle):
@@ -287,16 +412,23 @@ class GuardedReverse(Node):
         self.declare_parameter('distance', 0.10)
         self.declare_parameter('start_clearance', 0.45)
         self.declare_parameter('stop_clearance', 0.35)
+        self.declare_parameter('forward_start_clearance', 0.48)
+        self.declare_parameter('forward_stop_clearance', 0.36)
         self.declare_parameter('sensor_timeout', 0.50)
         self.declare_parameter('time_limit', 3.0)
-        self.declare_parameter('arc_speed', 0.05)
-        self.declare_parameter('wheel_separation', 0.36094)
-        self.declare_parameter('arc_distance', 0.07)
-        self.declare_parameter('arc_yaw', 0.22)
+        self.declare_parameter('arc_speed', 0.07)
+        self.declare_parameter('wheel_separation', DEFAULT_WHEEL_SEPARATION)
+        # A rolling pivot follows a centre-line arc at half the wheel
+        # separation.  Requiring 7 cm for 0.22 rad made the guard time out
+        # after the requested rotation had already completed.
+        self.declare_parameter('arc_distance', DEFAULT_ARC_DISTANCE)
+        self.declare_parameter('arc_yaw', DEFAULT_ARC_YAW)
         self.declare_parameter('arc_start_rear_clearance', 0.32)
         self.declare_parameter('arc_stop_rear_clearance', 0.24)
         self.declare_parameter('arc_start_side_clearance', 0.40)
         self.declare_parameter('arc_stop_side_clearance', 0.28)
+        self.declare_parameter('forward_arc_start_clearance', 0.48)
+        self.declare_parameter('forward_arc_stop_clearance', 0.36)
         self.declare_parameter('arc_time_limit', 3.0)
 
         self.speed = min(0.07, max(0.02, float(
@@ -308,6 +440,12 @@ class GuardedReverse(Node):
         self.stop_clearance = max(0.25, min(
             self.start_clearance,
             float(self.get_parameter('stop_clearance').value),
+        ))
+        self.forward_start_clearance = max(0.45, float(
+            self.get_parameter('forward_start_clearance').value))
+        self.forward_stop_clearance = max(0.32, min(
+            self.forward_start_clearance,
+            float(self.get_parameter('forward_stop_clearance').value),
         ))
         self.sensor_timeout = min(1.0, max(0.20, float(
             self.get_parameter('sensor_timeout').value)))
@@ -322,7 +460,7 @@ class GuardedReverse(Node):
         # range, so minimum PWM made the robot turn in the opposite direction.
         self.arc_turn_rate = rolling_pivot_turn_rate(
             self.arc_speed, wheel_separation)
-        self.arc_distance = min(0.14, max(0.06, float(
+        self.arc_distance = min(0.14, max(0.03, float(
             self.get_parameter('arc_distance').value)))
         self.arc_yaw = min(0.45, max(0.18, float(
             self.get_parameter('arc_yaw').value)))
@@ -337,6 +475,12 @@ class GuardedReverse(Node):
         self.arc_stop_side_clearance = max(0.22, min(
             self.arc_start_side_clearance,
             float(self.get_parameter('arc_stop_side_clearance').value),
+        ))
+        self.forward_arc_start_clearance = max(0.45, float(
+            self.get_parameter('forward_arc_start_clearance').value))
+        self.forward_arc_stop_clearance = max(0.32, min(
+            self.forward_arc_start_clearance,
+            float(self.get_parameter('forward_arc_stop_clearance').value),
         ))
         self.arc_time_limit = min(5.0, max(1.5, float(
             self.get_parameter('arc_time_limit').value)))
@@ -372,6 +516,12 @@ class GuardedReverse(Node):
         )
         self.create_service(
             Trigger,
+            '/guarded_forward_escape',
+            self.forward_callback,
+            callback_group=callbacks,
+        )
+        self.create_service(
+            Trigger,
             '/guarded_arc_escape_left',
             self.arc_left_callback,
             callback_group=callbacks,
@@ -380,6 +530,18 @@ class GuardedReverse(Node):
             Trigger,
             '/guarded_arc_escape_right',
             self.arc_right_callback,
+            callback_group=callbacks,
+        )
+        self.create_service(
+            Trigger,
+            '/guarded_forward_arc_escape_left',
+            self.forward_arc_left_callback,
+            callback_group=callbacks,
+        )
+        self.create_service(
+            Trigger,
+            '/guarded_forward_arc_escape_right',
+            self.forward_arc_right_callback,
             callback_group=callbacks,
         )
 
@@ -410,24 +572,28 @@ class GuardedReverse(Node):
             self.latest_yaw = yaw
             self.odom_monotonic = time.monotonic()
 
-    def snapshot(self):
+    def straight_snapshot(self, motion_direction):
         with self.data_lock:
             scan = self.latest_scan_geometry
             scan_time = self.scan_monotonic
             odom = self.latest_odom
             odom_time = self.odom_monotonic
-        clearance = None
+        clearance = scan_geometry = None
         if scan is not None:
-            clearance = recovery_sector_clearances(
-                scan.ranges,
-                angle_min=float(scan.angle_min),
-                angle_increment=float(scan.angle_increment),
-                range_min=float(scan.range_min),
-                range_max=float(scan.range_max),
-            )[0]
-        return clearance, scan_time, odom, odom_time
+            scan_geometry = {
+                'ranges': scan.ranges,
+                'angle_min': float(scan.angle_min),
+                'angle_increment': float(scan.angle_increment),
+                'range_min': float(scan.range_min),
+                'range_max': float(scan.range_max),
+            }
+            if motion_direction < 0:
+                clearance = recovery_sector_clearances(**scan_geometry)[0]
+            else:
+                clearance = robust_front_clearance(**scan_geometry)
+        return clearance, scan_geometry, scan_time, odom, odom_time
 
-    def arc_snapshot(self, turn_direction):
+    def arc_snapshot(self, turn_direction, motion_direction=-1):
         with self.data_lock:
             scan = self.latest_scan_geometry
             scan_time = self.scan_monotonic
@@ -439,7 +605,7 @@ class GuardedReverse(Node):
                     self.latest_yaw,
                 )
             odom_time = self.odom_monotonic
-        rear = side_clearance = None
+        longitudinal = side_clearance = None
         if scan is not None:
             scan = {
                 'ranges': scan.ranges,
@@ -449,9 +615,12 @@ class GuardedReverse(Node):
                 'range_max': float(scan.range_max),
             }
             rear, left, right = recovery_sector_clearances(**scan)
+            longitudinal = rear if motion_direction < 0 else robust_front_clearance(
+                **scan
+            )
             side_clearance = left if turn_direction > 0 else right
         return (
-            rear,
+            longitudinal,
             side_clearance,
             scan,
             scan_time,
@@ -468,7 +637,20 @@ class GuardedReverse(Node):
             response.message = 'A guarded reverse is already active'
             return response
         try:
-            return self.run_reverse(response)
+            return self.run_straight(response, motion_direction=-1)
+        finally:
+            for _ in range(5):
+                self.publish_stop()
+                time.sleep(0.05)
+            self.operation_lock.release()
+
+    def forward_callback(self, _request, response):
+        if not self.operation_lock.acquire(blocking=False):
+            response.success = False
+            response.message = 'A guarded escape is already active'
+            return response
+        try:
+            return self.run_straight(response, motion_direction=1)
         finally:
             for _ in range(5):
                 self.publish_stop()
@@ -476,117 +658,185 @@ class GuardedReverse(Node):
             self.operation_lock.release()
 
     def arc_left_callback(self, _request, response):
-        return self.arc_callback(response, turn_direction=1)
+        return self.arc_callback(response, turn_direction=1, motion_direction=-1)
 
     def arc_right_callback(self, _request, response):
-        return self.arc_callback(response, turn_direction=-1)
+        return self.arc_callback(response, turn_direction=-1, motion_direction=-1)
 
-    def arc_callback(self, response, *, turn_direction):
+    def forward_arc_left_callback(self, _request, response):
+        return self.arc_callback(response, turn_direction=1, motion_direction=1)
+
+    def forward_arc_right_callback(self, _request, response):
+        return self.arc_callback(response, turn_direction=-1, motion_direction=1)
+
+    def arc_callback(self, response, *, turn_direction, motion_direction):
         if not self.operation_lock.acquire(blocking=False):
             response.success = False
             response.message = 'A guarded escape is already active'
             return response
         try:
-            return self.run_arc(response, turn_direction=turn_direction)
+            return self.run_arc(
+                response,
+                turn_direction=turn_direction,
+                motion_direction=motion_direction,
+            )
         finally:
             for _ in range(5):
                 self.publish_stop()
                 time.sleep(0.05)
             self.operation_lock.release()
 
-    def run_reverse(self, response):
+    def run_straight(self, response, *, motion_direction):
+        motion_name = 'reverse' if motion_direction < 0 else 'forward'
+        longitudinal_name = 'rear' if motion_direction < 0 else 'front'
+        start_clearance = (
+            self.start_clearance
+            if motion_direction < 0
+            else self.forward_start_clearance
+        )
+        stop_clearance = (
+            self.stop_clearance
+            if motion_direction < 0
+            else self.forward_stop_clearance
+        )
         now = time.monotonic()
-        clearance, scan_time, start, odom_time = self.snapshot()
-        if clearance is None or now - scan_time > self.sensor_timeout:
+        clearance, scan, scan_time, start, odom_time = (
+            self.straight_snapshot(motion_direction)
+        )
+        label = f'Guarded {motion_name}'
+        if (
+            clearance is None
+            or scan is None
+            or now - scan_time > self.sensor_timeout
+        ):
             response.success = False
-            response.message = 'Guarded reverse refused: rear LaserScan is stale'
+            response.message = f'{label} refused: LaserScan is stale'
             return response
         if start is None or now - odom_time > self.sensor_timeout:
             response.success = False
-            response.message = 'Guarded reverse refused: wheel odometry is stale'
+            response.message = f'{label} refused: wheel odometry is stale'
             return response
-        if clearance < self.start_clearance:
+        if clearance < start_clearance:
             response.success = False
             response.message = (
-                'Guarded reverse refused: rear clearance '
-                f'{clearance:.2f} m is below {self.start_clearance:.2f} m'
+                f'{label} refused: {longitudinal_name} clearance '
+                f'{clearance:.2f} m is below {start_clearance:.2f} m'
+            )
+            return response
+        obstacle = swept_straight_obstacle_distance(
+            motion_direction=motion_direction,
+            distance=self.distance,
+            **scan,
+        )
+        if obstacle is not None:
+            response.success = False
+            response.message = (
+                f'{label} refused: an obstacle intersects the swept footprint '
+                f'at {obstacle:.2f} m'
             )
             return response
 
         command = Twist()
-        command.linear.x = -self.speed
+        command.linear.x = motion_direction * self.speed
         deadline = now + self.time_limit
         while time.monotonic() < deadline:
             now = time.monotonic()
-            clearance, scan_time, position, odom_time = self.snapshot()
+            clearance, scan, scan_time, position, odom_time = (
+                self.straight_snapshot(motion_direction)
+            )
             if (
                 clearance is None
+                or scan is None
                 or now - scan_time > self.sensor_timeout
-                or clearance < self.stop_clearance
+                or clearance < stop_clearance
             ):
                 response.success = False
-                response.message = 'Guarded reverse stopped: rear path is no longer safe'
+                response.message = (
+                    f'{label} stopped: {longitudinal_name} path is no longer safe'
+                )
+                return response
+            obstacle = swept_straight_obstacle_distance(
+                motion_direction=motion_direction,
+                distance=self.distance,
+                **scan,
+            )
+            if obstacle is not None:
+                response.success = False
+                response.message = (
+                    f'{label} stopped: an obstacle entered the swept footprint '
+                    f'at {obstacle:.2f} m'
+                )
                 return response
             if position is None or now - odom_time > self.sensor_timeout:
                 response.success = False
-                response.message = 'Guarded reverse stopped: wheel odometry became stale'
+                response.message = f'{label} stopped: wheel odometry became stale'
                 return response
             travelled = math.hypot(position[0] - start[0], position[1] - start[1])
             if travelled >= self.distance:
                 response.success = True
                 response.message = (
-                    f'Guarded reverse completed {travelled:.2f} m; '
-                    f'rear clearance {clearance:.2f} m'
+                    f'{label} completed {travelled:.2f} m; '
+                    f'{longitudinal_name} clearance {clearance:.2f} m'
                 )
                 return response
             self.publisher.publish(command)
             time.sleep(0.05)
 
         response.success = False
-        response.message = 'Guarded reverse timed out before measured motion completed'
+        response.message = (
+            f'{label} timed out before measured motion completed'
+        )
         return response
 
-    def run_arc(self, response, *, turn_direction):
+    def run_arc(self, response, *, turn_direction, motion_direction=-1):
         direction_name = 'left' if turn_direction > 0 else 'right'
-        now = time.monotonic()
-        rear, side, scan, scan_time, start, odom_time = self.arc_snapshot(
-            turn_direction,
+        motion_name = 'reverse' if motion_direction < 0 else 'forward'
+        longitudinal_name = 'rear' if motion_direction < 0 else 'front'
+        start_clearance = (
+            self.arc_start_rear_clearance
+            if motion_direction < 0
+            else self.forward_arc_start_clearance
         )
+        stop_clearance = (
+            self.arc_stop_rear_clearance
+            if motion_direction < 0
+            else self.forward_arc_stop_clearance
+        )
+        now = time.monotonic()
+        longitudinal, side, scan, scan_time, start, odom_time = (
+            self.arc_snapshot(turn_direction, motion_direction)
+        )
+        label = f'Guarded {motion_name} {direction_name} arc'
         if (
-            rear is None
+            longitudinal is None
             or side is None
             or scan is None
             or now - scan_time > self.sensor_timeout
         ):
             response.success = False
-            response.message = (
-                f'Guarded {direction_name} arc refused: LaserScan is stale'
-            )
+            response.message = f'{label} refused: LaserScan is stale'
             return response
         if start is None or now - odom_time > self.sensor_timeout:
             response.success = False
-            response.message = (
-                f'Guarded {direction_name} arc refused: '
-                'wheel odometry is stale'
-            )
+            response.message = f'{label} refused: wheel odometry is stale'
             return response
-        if rear < self.arc_start_rear_clearance:
+        if longitudinal < start_clearance:
             response.success = False
             response.message = (
-                f'Guarded {direction_name} arc refused: rear clearance '
-                f'{rear:.2f} m is below {self.arc_start_rear_clearance:.2f} m'
+                f'{label} refused: {longitudinal_name} clearance '
+                f'{longitudinal:.2f} m is below {start_clearance:.2f} m'
             )
             return response
         if side < self.arc_start_side_clearance:
             response.success = False
             response.message = (
-                f'Guarded {direction_name} arc refused: '
-                f'{direction_name} clearance '
+                f'{label} refused: {direction_name} clearance '
                 f'{side:.2f} m is below {self.arc_start_side_clearance:.2f} m'
             )
             return response
         obstacle = swept_arc_obstacle_distance(
             turn_direction=turn_direction,
+            motion_direction=motion_direction,
             arc_speed=self.arc_speed,
             arc_turn_rate=self.arc_turn_rate,
             arc_yaw=self.arc_yaw,
@@ -595,34 +845,32 @@ class GuardedReverse(Node):
         if obstacle is not None:
             response.success = False
             response.message = (
-                f'Guarded {direction_name} arc refused: an obstacle intersects '
-                f'the swept footprint at {obstacle:.2f} m'
+                f'{label} refused: an obstacle intersects the swept footprint '
+                f'at {obstacle:.2f} m'
             )
             return response
 
         command = Twist()
-        command.linear.x = -self.arc_speed
+        command.linear.x = motion_direction * self.arc_speed
         command.angular.z = turn_direction * self.arc_turn_rate
         deadline = now + self.arc_time_limit
         while time.monotonic() < deadline:
             now = time.monotonic()
-            rear, side, scan, scan_time, pose, odom_time = self.arc_snapshot(
-                turn_direction,
+            longitudinal, side, scan, scan_time, pose, odom_time = (
+                self.arc_snapshot(turn_direction, motion_direction)
             )
             if (
-                rear is None
+                longitudinal is None
                 or side is None
                 or scan is None
                 or now - scan_time > self.sensor_timeout
             ):
                 response.success = False
-                response.message = (
-                    f'Guarded {direction_name} arc stopped: '
-                    'LaserScan became stale'
-                )
+                response.message = f'{label} stopped: LaserScan became stale'
                 return response
             obstacle = swept_arc_obstacle_distance(
                 turn_direction=turn_direction,
+                motion_direction=motion_direction,
                 arc_speed=self.arc_speed,
                 arc_turn_rate=self.arc_turn_rate,
                 arc_yaw=self.arc_yaw,
@@ -631,30 +879,27 @@ class GuardedReverse(Node):
             if obstacle is not None:
                 response.success = False
                 response.message = (
-                    f'Guarded {direction_name} arc stopped: an obstacle entered '
-                    f'the swept footprint at {obstacle:.2f} m'
+                    f'{label} stopped: an obstacle entered the swept footprint '
+                    f'at {obstacle:.2f} m'
                 )
                 return response
-            if rear < self.arc_stop_rear_clearance:
+            if longitudinal < stop_clearance:
                 response.success = False
                 response.message = (
-                    f'Guarded {direction_name} arc stopped: rear clearance '
-                    f'fell to {rear:.2f} m'
+                    f'{label} stopped: {longitudinal_name} clearance fell to '
+                    f'{longitudinal:.2f} m'
                 )
                 return response
             if side < self.arc_stop_side_clearance:
                 response.success = False
                 response.message = (
-                    f'Guarded {direction_name} arc stopped: {direction_name} '
-                    f'clearance fell to {side:.2f} m'
+                    f'{label} stopped: {direction_name} clearance fell to '
+                    f'{side:.2f} m'
                 )
                 return response
             if pose is None or now - odom_time > self.sensor_timeout:
                 response.success = False
-                response.message = (
-                    f'Guarded {direction_name} arc stopped: '
-                    'wheel odometry became stale'
-                )
+                response.message = f'{label} stopped: wheel odometry became stale'
                 return response
 
             travelled, directed_yaw = measured_arc_progress(
@@ -665,8 +910,8 @@ class GuardedReverse(Node):
             if directed_yaw < -0.08:
                 response.success = False
                 response.message = (
-                    f'Guarded {direction_name} arc stopped: '
-                    'odometry reported rotation in the opposite direction'
+                    f'{label} stopped: odometry reported rotation in the '
+                    'opposite direction'
                 )
                 return response
             if arc_motion_complete(
@@ -678,10 +923,10 @@ class GuardedReverse(Node):
             ):
                 response.success = True
                 response.message = (
-                    f'Guarded {direction_name} arc completed '
-                    f'{travelled:.2f} m / '
+                    f'{label} completed {travelled:.2f} m / '
                     f'{math.degrees(directed_yaw):.1f} deg; '
-                    f'rear {rear:.2f} m, side {side:.2f} m'
+                    f'{longitudinal_name} {longitudinal:.2f} m, '
+                    f'side {side:.2f} m'
                 )
                 return response
             self.publisher.publish(command)
@@ -689,8 +934,7 @@ class GuardedReverse(Node):
 
         response.success = False
         response.message = (
-            f'Guarded {direction_name} arc timed out before measured '
-            'distance and yaw completed'
+            f'{label} timed out before measured distance and yaw completed'
         )
         return response
 

@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 from action_msgs.msg import GoalStatus
 
-from amr_web_bridge.web_bridge_node import WebBridgeNode
+from amr_web_bridge.web_bridge_node import (
+    navigation_abort_detail,
+    WebBridgeNode,
+)
 
 
 def preview_request():
@@ -39,6 +42,36 @@ def bridge():
         info=lambda _message: None,
     )
     return value
+
+
+def test_navigation_speed_limit_is_clamped_and_published_as_absolute_speed():
+    published = []
+    value = SimpleNamespace(
+        navigation_speed_limit_publisher=SimpleNamespace(publish=published.append),
+        get_clock=lambda: SimpleNamespace(
+            now=lambda: SimpleNamespace(to_msg=lambda: SimpleNamespace())
+        ),
+        get_logger=lambda: SimpleNamespace(info=lambda _message: None),
+    )
+
+    WebBridgeNode.publish_navigation_speed_limit(value, 0.30)
+
+    assert len(published) == 1
+    assert published[0].percentage is False
+    assert published[0].speed_limit == 0.30
+
+
+def test_navigation_abort_detail_explains_controller_patience_error():
+    assert navigation_abort_detail(104, 'Nav2 goal was aborted') == (
+        'Nav2 controller patience exceeded; no safe control command '
+        'was available in time'
+    )
+
+
+def test_navigation_abort_detail_preserves_specific_nav2_message():
+    assert navigation_abort_detail(104, 'Collision detected ahead') == (
+        'Collision detected ahead'
+    )
 
 
 def test_valid_preview_is_queued_without_navigation_goal():
@@ -213,9 +246,18 @@ def test_native_recovery_plan_has_bounded_timeout():
     assert detail.startswith('Planner timeout:')
 
 
-def near_goal_bridge(distance=0.28, *, localized=True, faulted=False):
+def near_goal_bridge(
+    distance=0.08,
+    *,
+    yaw=0.0,
+    requires_heading=False,
+    localized=True,
+    faulted=False,
+):
     value = SimpleNamespace(
-        near_goal_acceptance_distance_m=0.35,
+        near_goal_acceptance_distance_m=0.20,
+        near_goal_acceptance_yaw_radians=0.20,
+        near_goal_acceptance_requires_heading=requires_heading,
         motion_stop_latched=lambda: False,
         localization_snapshot=lambda: {
             'health': 'LOCALIZED' if localized else 'LOST',
@@ -225,7 +267,7 @@ def near_goal_bridge(distance=0.28, *, localized=True, faulted=False):
                 'frame_id': 'map',
                 'x': distance,
                 'y': 0.0,
-                'yaw': 0.0,
+                'yaw': yaw,
             },
             'detail': 'ready' if localized else 'AMCL is inactive',
         },
@@ -251,17 +293,37 @@ def test_aborted_goal_is_accepted_inside_bounded_arrival_radius():
     )
 
     assert accepted is True
-    assert '0.28 m from the goal' in detail
+    assert '0.08 m from center' in detail
 
 
 def test_aborted_goal_is_not_accepted_outside_arrival_radius():
     accepted, detail = WebBridgeNode.accept_aborted_goal_when_near(
-        near_goal_bridge(distance=0.36),
+        near_goal_bridge(distance=0.21),
         near_goal_command(),
     )
 
     assert accepted is False
-    assert 'outside the 0.35 m acceptance radius' in detail
+    assert 'outside the 0.20 m acceptance radius' in detail
+
+
+def test_aborted_goal_is_not_accepted_with_wrong_heading():
+    accepted, detail = WebBridgeNode.accept_aborted_goal_when_near(
+        near_goal_bridge(yaw=0.30, requires_heading=True),
+        near_goal_command(),
+    )
+
+    assert accepted is False
+    assert 'outside the 0.20 rad acceptance tolerance' in detail
+
+
+def test_aborted_goal_area_does_not_require_exact_heading():
+    accepted, detail = WebBridgeNode.accept_aborted_goal_when_near(
+        near_goal_bridge(distance=0.19, yaw=2.8),
+        near_goal_command(),
+    )
+
+    assert accepted is True
+    assert 'inside the 0.20 m goal area' in detail
 
 
 def test_aborted_goal_is_not_accepted_when_localization_is_lost():
@@ -297,8 +359,8 @@ def test_navigation_abort_near_goal_reports_success_without_escape_recovery():
             'Accepted arrival 0.28 m from the goal after Nav2 was blocked '
             'near the destination',
         ),
-        maybe_start_blocked_pose_recovery=lambda command, detail: (
-            recovery_calls.append((command, detail)) or True
+        maybe_start_blocked_pose_recovery=lambda command, detail, error_code: (
+            recovery_calls.append((command, detail, error_code)) or True
         ),
         send_navigation_result=lambda command, status, detail: sent.append(
             (command, status, detail)
@@ -317,7 +379,7 @@ def test_navigation_abort_near_goal_reports_success_without_escape_recovery():
     }
     future = ImmediateFuture(SimpleNamespace(
         status=GoalStatus.STATUS_ABORTED,
-        result=SimpleNamespace(error_msg='Nav2 goal was aborted'),
+        result=SimpleNamespace(error_msg='Nav2 goal was aborted', error_code=105),
     ))
 
     WebBridgeNode.navigation_result_callback(value, future, command)

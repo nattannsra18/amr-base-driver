@@ -1,0 +1,7 @@
+[Unit]
+Description=Indoor Delivery Robot Critical Control Workload
+
+[Slice]
+CPUWeight=1000
+AllowedCPUs=3
+

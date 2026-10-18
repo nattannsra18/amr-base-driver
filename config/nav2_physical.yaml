@@ -1,6 +1,9 @@
 controller_server:
   ros__parameters:
     use_sim_time: false
+    # The EKF is the only velocity estimate used on the physical robot.
+    # Do not silently fall back to the un-published relative topic `odom`.
+    odom_topic: /odometry/filtered
     controller_frequency: 10.0
     costmap_update_timeout: 0.5
     min_x_velocity_threshold: 0.005
@@ -14,28 +17,31 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.05
-      # A wedged chassis can still report wheel motion, so the encoder guard
-      # cannot always detect it.  Hand control to the collision-checked
-      # recovery tree promptly instead of waiting 15 seconds per retry.
-      # Heading alignment is real progress, even before translation starts.
-      # Keep a bounded timeout for a chassis which is genuinely stationary.
+      # Heading alignment and overcoming caster/static friction can take more
+      # than four seconds. The Agent now receives controller error codes and
+      # owns the one-shot collision-checked recovery, so avoid false aborts.
       required_movement_angle: 0.15
-      movement_time_allowance: 4.0
+      movement_time_allowance: 15.0
 
     goal_checker:
-      plugin: "nav2_controller::SimpleGoalChecker"
+      # A delivery station is an arrival area, not a precision docking pose.
+      plugin: "nav2_controller::PositionGoalChecker"
       stateful: true
-      xy_goal_tolerance: 0.08
-      yaw_goal_tolerance: 0.15
+      xy_goal_tolerance: 0.20
+      path_length_tolerance: 0.75
 
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.08
-      lookahead_dist: 0.22
-      min_lookahead_dist: 0.18
-      max_lookahead_dist: 0.35
+      # Task commands publish an absolute /speed_limit from 0.08-0.30 m/s.
+      # Keep the controller ceiling at the validated web maximum.
+      desired_linear_vel: 0.30
+      lookahead_dist: 0.30
+      min_lookahead_dist: 0.20
+      max_lookahead_dist: 0.45
       lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.60
+      # Keep the turn command above the loaded caster's stiction region. The
+      # velocity smoother still bounds angular acceleration to 0.40 rad/s^2.
+      rotate_to_heading_angular_vel: 1.20
       transform_tolerance: 0.20
       use_velocity_scaled_lookahead_dist: true
       min_approach_linear_velocity: 0.05
@@ -46,9 +52,9 @@ controller_server:
       use_cost_regulated_linear_velocity_scaling: true
       regulated_linear_scaling_min_radius: 0.70
       regulated_linear_scaling_min_speed: 0.06
-      cost_scaling_dist: 0.30
+      cost_scaling_dist: 0.35
       cost_scaling_gain: 1.0
-      inflation_cost_scaling_factor: 7.0
+      inflation_cost_scaling_factor: 5.0
       use_rotate_to_heading: true
       allow_reversing: false
       rotate_to_heading_min_angle: 0.785
@@ -90,8 +96,8 @@ local_costmap:
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.30
-        cost_scaling_factor: 7.0
+        inflation_radius: 0.35
+        cost_scaling_factor: 5.0
       always_send_full_costmap: true
 
 global_costmap:
@@ -126,8 +132,8 @@ global_costmap:
           max_obstacle_height: 2.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        inflation_radius: 0.30
-        cost_scaling_factor: 7.0
+        inflation_radius: 0.35
+        cost_scaling_factor: 5.0
       always_send_full_costmap: true
 
 planner_server:
@@ -137,15 +143,28 @@ planner_server:
     costmap_update_timeout: 1.0
     planner_plugins: ["GridBased"]
     GridBased:
+      # Plan for a differential drive that can rotate to the path heading.
+      # Hybrid-A* with DUBIN modeled the base as a forward-only car and forced
+      # wide approach arcs even though both zero-radius spin directions passed
+      # attended floor HIL.
       plugin: "nav2_smac_planner::SmacPlanner2D"
       tolerance: 0.10
       allow_unknown: false
       downsample_costmap: false
+      downsampling_factor: 1
       max_iterations: 1000000
       max_on_approach_iterations: 1000
       terminal_checking_interval: 5000
-      use_final_approach_orientation: false
+      max_planning_time: 2.0
       cost_travel_multiplier: 2.0
+      # Delivery stations are position areas, so preserve the approach
+      # direction instead of adding a final orientation-only maneuver.
+      use_final_approach_orientation: true
+      smoother:
+        max_iterations: 1000
+        w_smooth: 0.3
+        w_data: 0.2
+        tolerance: 1.0e-10
 
 bt_navigator:
   ros__parameters:
@@ -190,8 +209,9 @@ behavior_server:
     robot_base_frame: base_footprint
     transform_tolerance: 0.20
     simulate_ahead_time: 2.0
-    max_rotational_vel: 0.25
-    min_rotational_vel: 0.18
+    max_rotational_vel: 0.50
+    # 0.25 rad/s was only just above the loaded drivetrain's trackable floor.
+    min_rotational_vel: 0.50
     rotational_acc_lim: 0.35
 
 velocity_smoother:
@@ -201,8 +221,8 @@ velocity_smoother:
     stamp_smoothed_velocity_with_smoothing_time: false
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.10, 0.0, 0.60]
-    min_velocity: [-0.06, 0.0, -0.60]
+    max_velocity: [0.30, 0.0, 1.20]
+    min_velocity: [-0.06, 0.0, -1.20]
     max_accel: [0.10, 0.0, 0.40]
     max_decel: [-0.15, 0.0, -0.50]
     odom_topic: /odometry/filtered
@@ -227,7 +247,7 @@ collision_monitor:
       type: "polygon"
       action_type: "approach"
       footprint_topic: /local_costmap/published_footprint
-      time_before_collision: 1.5
+      time_before_collision: 2.0
       simulation_time_step: 0.1
       min_points: 3
       visualize: true

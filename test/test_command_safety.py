@@ -11,11 +11,28 @@ def state():
                           motors_enabled=True,
                           requested_linear=.05, requested_angular=0.0,
                           separation=.36094, radius=.032085, max_rpm=90,
+                          minimum_trackable_rpm=12.0,
+                          stall_guard_min_target_rpm=20.0,
+                          stall_guard_max_measured_rpm=3.0,
+                          stall_guard_timeout_seconds=1.2,
+                          measured_left_rpm=15.0, measured_right_rpm=15.0,
+                          stall_candidate_started=[None, None],
+                          drive_blocked=False, blocked_left=False,
+                          blocked_right=False,
+                          blocked_target_rpm=(0.0, 0.0),
+                          last_drive_stall_monotonic=0.0,
                           command_sequence=0, serial_port=object(),
                           write_line=sent.append,
+                          diagnostic_tick=lambda: None,
                           get_logger=lambda: SimpleNamespace(
                               warning=lambda _message: None,
                               error=lambda _message: None))
+    obj.clear_drive_blocked = lambda: SerialBridge.clear_drive_blocked(obj)
+    obj.update_stall_guard = (
+        lambda now, left, right: SerialBridge.update_stall_guard(
+            obj, now, left, right
+        )
+    )
     return obj, sent
 
 

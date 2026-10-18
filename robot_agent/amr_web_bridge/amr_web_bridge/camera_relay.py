@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 import json
 import logging
 import os
+from pathlib import Path
 import struct
 import threading
 import time
-from collections import deque
-from dataclasses import dataclass
-from pathlib import Path
 from urllib.request import urlopen
 
 import websockets
@@ -24,10 +25,9 @@ MAX_BUFFER_BYTES = 2_000_000
 CAMERA_FRAME_MAGIC = b'IDRC'
 CAMERA_FRAME_VERSION = 1
 CAMERA_FRAME_HEADER = struct.Struct('!4sBQQQ')
-# Keep a small bandwidth-delay window so WAN acknowledgement latency does not
-# throttle a 30 FPS source.  Frames are still bounded and the source retains
-# only its newest JPEG, so slow links cannot build an unbounded video queue.
-CAMERA_MAX_IN_FLIGHT = 8
+# Three frames cover the measured Wi-Fi RTT at 30 FPS while bounding wire
+# backlog to roughly 100 ms during a brief network stall.
+CAMERA_MAX_IN_FLIGHT = 3
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,18 @@ def camera_frame_acknowledged(message: object, sequence: int) -> bool:
     )
 
 
+def camera_stream_requested(message: object) -> bool | None:
+    """Return a server demand update, or None for another message type."""
+    try:
+        payload = json.loads(str(message))
+    except (TypeError, ValueError):
+        return None
+    if payload.get('type') not in {'camera_ready', 'camera_demand'}:
+        return None
+    requested = payload.get('stream_requested')
+    return requested if isinstance(requested, bool) else None
+
+
 class LatestJpegSource:
     """Continuously decode an MJPEG byte stream while retaining one frame."""
 
@@ -71,7 +83,10 @@ class LatestJpegSource:
         self.frame: CapturedJpeg | None = None
         self.sequence = 0
         self.stopped = threading.Event()
+        self.active = threading.Event()
+        self.active.set()
         self.thread: threading.Thread | None = None
+        self.frame_callback: Callable[[CapturedJpeg], None] | None = None
 
     def start(self) -> None:
         if self.thread is not None:
@@ -81,8 +96,23 @@ class LatestJpegSource:
 
     def stop(self) -> None:
         self.stopped.set()
+        self.active.set()
         with self.condition:
             self.condition.notify_all()
+
+    def set_active(self, active: bool) -> None:
+        if active:
+            self.active.set()
+        else:
+            self.active.clear()
+        with self.condition:
+            self.condition.notify_all()
+
+    def set_frame_callback(
+        self,
+        callback: Callable[[CapturedJpeg], None] | None,
+    ) -> None:
+        self.frame_callback = callback
 
     def wait_for_frame(
         self,
@@ -101,6 +131,8 @@ class LatestJpegSource:
 
     def _run(self) -> None:
         while not self.stopped.is_set():
+            if not self.active.wait(timeout=1.0):
+                continue
             try:
                 with urlopen(self.url, timeout=10) as stream:
                     LOGGER.info('Reading local camera stream: %s', self.url)
@@ -112,8 +144,14 @@ class LatestJpegSource:
 
     def _read_stream(self, stream) -> None:
         buffer = bytearray()
-        while not self.stopped.is_set():
-            chunk = stream.read(16_384)
+        # HTTPResponse.read(size) waits for the full size, which batches
+        # several small JPEGs and collapses a 30 FPS source to single digits.
+        # read1() returns currently available socket data without that delay.
+        read_available = getattr(stream, 'read1', stream.read)
+        while not self.stopped.is_set() and self.active.is_set():
+            # One 4 KiB read closely matches this camera's native MJPEG frame
+            # size, avoiding coalescing several frames into one notification.
+            chunk = read_available(4_096)
             if not chunk:
                 raise OSError('camera stream ended')
             buffer.extend(chunk)
@@ -132,14 +170,18 @@ class LatestJpegSource:
                     break
                 frame = bytes(buffer[start:end + 2])
                 del buffer[:end + 2]
+                captured = CapturedJpeg(
+                    sequence=self.sequence + 1,
+                    captured_at_ns=time.time_ns(),
+                    data=frame,
+                )
                 with self.condition:
                     self.sequence += 1
-                    self.frame = CapturedJpeg(
-                        sequence=self.sequence,
-                        captured_at_ns=time.time_ns(),
-                        data=frame,
-                    )
+                    self.frame = captured
                     self.condition.notify_all()
+                callback = self.frame_callback
+                if callback is not None:
+                    callback(captured)
 
 
 class CameraRelay:
@@ -158,6 +200,7 @@ class CameraRelay:
         self.frame_interval = 1.0 / max(1.0, min(max_fps, 30.0))
 
     async def run(self) -> None:
+        self.source.set_active(False)
         self.source.start()
         try:
             while True:
@@ -168,7 +211,7 @@ class CameraRelay:
                     continue
                 uri = (
                     f'{self.server_url}/ws/robots/'
-                    f'{credential.robot_id}/camera'
+                    f'{credential.robot_id}/camera?demand_control=1'
                 )
                 try:
                     await self._publish(uri, credential.credential)
@@ -193,49 +236,86 @@ class CameraRelay:
             if 'camera_ready' not in str(ready):
                 raise OSError('control plane rejected the camera handshake')
             LOGGER.info('Camera relay connected: %s', uri)
+            stream_requested = camera_stream_requested(ready)
+            # Old control planes do not advertise demand control. Preserve
+            # their always-on behavior during rolling upgrades.
+            if stream_requested is None:
+                stream_requested = True
+            self.source.set_active(stream_requested)
             sequence = 0
             next_send = 0.0
             pending_sequences: deque[int] = deque()
-            while True:
-                if len(pending_sequences) < CAMERA_MAX_IN_FLIGHT:
-                    result = await asyncio.to_thread(
-                        self.source.wait_for_frame,
-                        sequence,
-                        5.0 if not pending_sequences else self.frame_interval,
-                    )
-                    if result is not None:
-                        sequence = result.sequence
-                        frame = result
-                        delay = next_send - time.monotonic()
-                        if delay > 0:
-                            await asyncio.sleep(delay)
-                            newer = await asyncio.to_thread(
-                                self.source.wait_for_frame,
-                                sequence,
-                                0.0,
-                            )
-                            if newer is not None:
-                                sequence = newer.sequence
-                                frame = newer
-                        send_started = time.monotonic()
-                        await websocket.send(
-                            pack_camera_frame(frame, time.time_ns())
-                        )
-                        pending_sequences.append(sequence)
-                        next_send = send_started + self.frame_interval
+            frames: asyncio.Queue[CapturedJpeg] = asyncio.Queue(maxsize=1)
+            loop = asyncio.get_running_loop()
+
+            def enqueue_latest(frame: CapturedJpeg) -> None:
+                def offer() -> None:
+                    if frames.full():
+                        frames.get_nowait()
+                    frames.put_nowait(frame)
+
+                loop.call_soon_threadsafe(offer)
+
+            self.source.set_frame_callback(enqueue_latest)
+            try:
+                while True:
+                    if not stream_requested:
+                        control = await websocket.recv()
+                        demand = camera_stream_requested(control)
+                        if demand is not None:
+                            stream_requested = demand
+                            self.source.set_active(demand)
                         continue
-                if not pending_sequences:
-                    continue
-                acknowledgement = await asyncio.wait_for(
-                    websocket.recv(),
-                    timeout=3.0,
-                )
-                if not camera_frame_acknowledged(
-                    acknowledgement,
-                    pending_sequences[0],
-                ):
-                    raise OSError('invalid camera frame acknowledgement')
-                pending_sequences.popleft()
+                    if len(pending_sequences) < CAMERA_MAX_IN_FLIGHT:
+                        try:
+                            frame = await asyncio.wait_for(
+                                frames.get(),
+                                timeout=(
+                                    5.0
+                                    if not pending_sequences
+                                    else self.frame_interval
+                                ),
+                            )
+                        except asyncio.TimeoutError:
+                            frame = None
+                        if frame is not None:
+                            sequence = frame.sequence
+                            delay = next_send - time.monotonic()
+                            if delay > 0:
+                                await asyncio.sleep(delay)
+                                while not frames.empty():
+                                    frame = frames.get_nowait()
+                                    sequence = frame.sequence
+                            send_started = time.monotonic()
+                            await websocket.send(
+                                pack_camera_frame(frame, time.time_ns())
+                            )
+                            pending_sequences.append(sequence)
+                            next_send = send_started + self.frame_interval
+                            continue
+                    if not pending_sequences:
+                        continue
+                    acknowledgement = await asyncio.wait_for(
+                        websocket.recv(),
+                        timeout=3.0,
+                    )
+                    demand = camera_stream_requested(acknowledgement)
+                    if demand is not None:
+                        stream_requested = demand
+                        self.source.set_active(demand)
+                        if not demand:
+                            pending_sequences.clear()
+                            while not frames.empty():
+                                frames.get_nowait()
+                        continue
+                    if not camera_frame_acknowledged(
+                        acknowledgement,
+                        pending_sequences[0],
+                    ):
+                        raise OSError('invalid camera frame acknowledgement')
+                    pending_sequences.popleft()
+            finally:
+                self.source.set_frame_callback(None)
 
 
 def main() -> None:

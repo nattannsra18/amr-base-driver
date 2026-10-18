@@ -11,6 +11,7 @@ from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu, JointState
 from std_srvs.srv import Empty, SetBool, Trigger
 
@@ -27,6 +28,26 @@ def crc16_ccitt(data):
 def wrapped_int32_delta(current, previous):
     delta = (current - previous) & 0xFFFFFFFF
     return delta - 0x100000000 if delta & 0x80000000 else delta
+
+
+def suppress_untrackable_wheel_rpm(left_rpm, right_rpm, minimum_rpm):
+    """Stop a wheel whose requested speed is below the floor-testable range."""
+    threshold = max(0.0, float(minimum_rpm))
+    return tuple(
+        0.0 if 0.0 < abs(float(value)) < threshold else float(value)
+        for value in (left_rpm, right_rpm)
+    )
+
+
+def wheel_is_stalled(target_rpm, measured_rpm, command_age, *,
+                     minimum_target_rpm, maximum_measured_rpm,
+                     timeout_seconds):
+    """Detect a sustained, trackable command with no wheel motion."""
+    return (
+        abs(float(target_rpm)) >= float(minimum_target_rpm)
+        and abs(float(measured_rpm)) <= float(maximum_measured_rpm)
+        and float(command_age) >= float(timeout_seconds)
+    )
 
 
 def yaw_quaternion(yaw):
@@ -48,7 +69,12 @@ class SerialBridge(Node):
         self.declare_parameter('right_cpr', 2367.0)
         self.declare_parameter('accel_scale', 0.9372)
         self.declare_parameter('max_rpm', 90.0)
+        self.declare_parameter('minimum_trackable_rpm', 12.0)
         self.declare_parameter('cmd_vel_timeout', 0.25)
+        self.declare_parameter('stall_guard_min_target_rpm', 20.0)
+        self.declare_parameter('stall_guard_max_measured_rpm', 3.0)
+        self.declare_parameter('stall_guard_timeout_seconds', 1.2)
+        self.declare_parameter('stall_guard_recent_seconds', 30.0)
         self.declare_parameter('telemetry_publish_divisor', 2)
         self.declare_parameter('enable_motors', False)
         self.declare_parameter('odom_frame', 'odom')
@@ -63,7 +89,27 @@ class SerialBridge(Node):
         self.right_cpr = float(self.get_parameter('right_cpr').value)
         self.accel_scale = float(self.get_parameter('accel_scale').value)
         self.max_rpm = float(self.get_parameter('max_rpm').value)
+        self.minimum_trackable_rpm = max(
+            0.0,
+            float(self.get_parameter('minimum_trackable_rpm').value),
+        )
         self.cmd_timeout = float(self.get_parameter('cmd_vel_timeout').value)
+        self.stall_guard_min_target_rpm = max(
+            self.minimum_trackable_rpm,
+            float(self.get_parameter('stall_guard_min_target_rpm').value),
+        )
+        self.stall_guard_max_measured_rpm = max(
+            0.0,
+            float(self.get_parameter('stall_guard_max_measured_rpm').value),
+        )
+        self.stall_guard_timeout_seconds = max(
+            0.5,
+            float(self.get_parameter('stall_guard_timeout_seconds').value),
+        )
+        self.stall_guard_recent_seconds = max(
+            self.stall_guard_timeout_seconds,
+            float(self.get_parameter('stall_guard_recent_seconds').value),
+        )
         self.telemetry_publish_divisor = max(
             1,
             int(self.get_parameter('telemetry_publish_divisor').value),
@@ -98,6 +144,12 @@ class SerialBridge(Node):
         self.wheel_linear_mps = 0.0
         self.wheel_angular_rps = 0.0
         self.imu_angular_z_rps = 0.0
+        self.drive_blocked = False
+        self.blocked_left = False
+        self.blocked_right = False
+        self.stall_candidate_started = [None, None]
+        self.last_drive_stall_monotonic = 0.0
+        self.blocked_target_rpm = (0.0, 0.0)
         self.previous_left = None
         self.previous_right = None
         self.previous_mcu_ms = None
@@ -105,8 +157,12 @@ class SerialBridge(Node):
         self.y = 0.0
         self.yaw = 0.0
 
-        self.imu_pub = self.create_publisher(Imu, 'imu/data_raw', 20)
-        self.odom_pub = self.create_publisher(Odometry, 'wheel/odometry', 20)
+        # These are live sensor streams, not durable state. Best-effort keeps
+        # a slow DDS reader from blocking the callback that drains the UART.
+        self.imu_pub = self.create_publisher(
+            Imu, 'imu/data_raw', qos_profile_sensor_data)
+        self.odom_pub = self.create_publisher(
+            Odometry, 'wheel/odometry', qos_profile_sensor_data)
         self.joint_pub = self.create_publisher(JointState, 'joint_states', 20)
         self.diag_pub = self.create_publisher(
             DiagnosticArray, 'diagnostics', 10)
@@ -142,6 +198,7 @@ class SerialBridge(Node):
         self.requested_linear = 0.0
         self.requested_angular = 0.0
         self.last_cmd_monotonic = 0.0
+        self.clear_drive_blocked()
         self.write_line('STOP')
         self.write_line('CLEAR')
         response.success = True
@@ -154,6 +211,7 @@ class SerialBridge(Node):
         self.requested_linear = 0.0
         self.requested_angular = 0.0
         self.last_cmd_monotonic = 0.0
+        self.clear_drive_blocked()
         self.write_line('STOP')
 
         if not request.data:
@@ -280,11 +338,80 @@ class SerialBridge(Node):
                 ratio = self.max_rpm / peak
                 left_rpm *= ratio
                 right_rpm *= ratio
+            left_rpm, right_rpm = suppress_untrackable_wheel_rpm(
+                left_rpm,
+                right_rpm,
+                self.minimum_trackable_rpm,
+            )
+        if self.drive_blocked:
+            old_left, old_right = self.blocked_target_rpm
+            reversed_direction = any(
+                old * new < 0.0
+                for old, new in ((old_left, left_rpm), (old_right, right_rpm))
+            )
+            stopped = max(abs(left_rpm), abs(right_rpm)) < 0.5
+            if stopped or reversed_direction:
+                self.clear_drive_blocked()
+            else:
+                self.target_left_rpm = left_rpm
+                self.target_right_rpm = right_rpm
+                self.write_line('STOP')
+                return
+
         self.target_left_rpm = left_rpm
         self.target_right_rpm = right_rpm
+        self.update_stall_guard(now, left_rpm, right_rpm)
+        if self.drive_blocked:
+            self.write_line('STOP')
+            return
         self.write_line(
             f'CMD,{self.command_sequence},{left_rpm:.3f},{right_rpm:.3f}')
         self.command_sequence = (self.command_sequence + 1) & 0xFFFFFFFF
+
+    def clear_drive_blocked(self):
+        self.drive_blocked = False
+        self.blocked_left = False
+        self.blocked_right = False
+        self.stall_candidate_started = [None, None]
+        self.blocked_target_rpm = (0.0, 0.0)
+
+    def update_stall_guard(self, now, left_rpm, right_rpm):
+        targets = (left_rpm, right_rpm)
+        measured = (self.measured_left_rpm, self.measured_right_rpm)
+        stalled = [False, False]
+        for index, (target, actual) in enumerate(zip(targets, measured)):
+            if (
+                abs(target) < self.stall_guard_min_target_rpm
+                or abs(actual) > self.stall_guard_max_measured_rpm
+            ):
+                self.stall_candidate_started[index] = None
+                continue
+            started = self.stall_candidate_started[index]
+            if started is None:
+                self.stall_candidate_started[index] = now
+                continue
+            stalled[index] = wheel_is_stalled(
+                target,
+                actual,
+                now - started,
+                minimum_target_rpm=self.stall_guard_min_target_rpm,
+                maximum_measured_rpm=self.stall_guard_max_measured_rpm,
+                timeout_seconds=self.stall_guard_timeout_seconds,
+            )
+        if not any(stalled):
+            return
+        self.drive_blocked = True
+        self.blocked_left, self.blocked_right = stalled
+        self.blocked_target_rpm = targets
+        self.last_drive_stall_monotonic = now
+        sides = '/'.join(
+            side for side, is_stalled in zip(('left', 'right'), stalled)
+            if is_stalled
+        )
+        self.get_logger().error(
+            f'Encoder stall guard stopped both motors: {sides} wheel did not move'
+        )
+        self.diagnostic_tick()
 
     def extract_telemetry_frames(self):
         while len(self.rx_buffer) >= 4:
@@ -473,8 +600,18 @@ class SerialBridge(Node):
         drive = DiagnosticStatus()
         drive.name = 'Base drive telemetry'
         drive.hardware_id = 'odroid-base-driver'
-        drive.level = DiagnosticStatus.OK
-        drive.message = 'Wheel telemetry available'
+        stall_age = (
+            now - self.last_drive_stall_monotonic
+            if self.last_drive_stall_monotonic else float('inf')
+        )
+        stall_recent = stall_age <= self.stall_guard_recent_seconds
+        drive.level = (
+            DiagnosticStatus.ERROR if self.drive_blocked else DiagnosticStatus.OK
+        )
+        drive.message = (
+            'Encoder stall guard is holding motor output at zero'
+            if self.drive_blocked else 'Wheel telemetry available'
+        )
         drive.values = [
             KeyValue(key='motors_enabled', value=str(self.motors_enabled)),
             KeyValue(
@@ -506,6 +643,13 @@ class SerialBridge(Node):
             KeyValue(
                 key='imu_angular_z_rps',
                 value=f'{self.imu_angular_z_rps:.4f}'),
+            KeyValue(key='drive_blocked', value=str(self.drive_blocked)),
+            KeyValue(key='blocked_left', value=str(self.blocked_left)),
+            KeyValue(key='blocked_right', value=str(self.blocked_right)),
+            KeyValue(key='drive_stall_recent', value=str(stall_recent)),
+            KeyValue(
+                key='drive_stall_age_s',
+                value=f'{stall_age:.3f}' if math.isfinite(stall_age) else 'inf'),
         ]
 
         array = DiagnosticArray()

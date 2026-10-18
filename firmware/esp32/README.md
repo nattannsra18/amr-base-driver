@@ -65,7 +65,7 @@ images created by Arduino CLI:
 ```bash
 python3 -m esptool \
   --chip esp32 --port /dev/ttyUSBX --baud 115200 --no-stub \
-  write_flash --flash_mode dio --flash_freq 80m --flash_size 4MB \
+  write_flash --flash_mode dio --flash_freq 40m --flash_size 4MB \
   0x1000  robot_base_tb6612_mapping_v3_floor_start.ino.bootloader.bin \
   0x8000  robot_base_tb6612_mapping_v3_floor_start.ino.partitions.bin \
   0xe000  boot_app0.bin \

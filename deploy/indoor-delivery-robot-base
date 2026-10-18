@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Keep motor I/O and its watchdog isolated from Nav2 and observability load.
+set -Eeo pipefail
+
+: "${ROS_DISTRO:?ROS_DISTRO is required}"
+: "${AMR_WORKSPACE:?AMR_WORKSPACE is required}"
+
+source "/opt/ros/$ROS_DISTRO/setup.bash"
+source "$AMR_WORKSPACE/install/setup.bash"
+exec ros2 launch amr_base_driver base_hardware.launch.py \
+  enable_motors:="${AMR_ENABLE_MOTORS:-false}" \
+  enable_base_control:=true \
+  enable_support:=false \
+  enable_black_box:=false \
+  ekf_transform_time_offset:=0.10

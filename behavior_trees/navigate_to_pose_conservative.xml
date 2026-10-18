@@ -1,72 +1,34 @@
 <!--
-  Physical-robot tree: replan when the path becomes invalid. If navigation
-  fails, try one short collision-checked reverse motion before planning again,
-  then clear both costmaps on the next retry.  Reverse comes first so a chassis
-  caught on furniture does not wait through another full progress-check cycle.
-  Automatic spin remains disabled until it has passed a separate attended
-  caster floor test.
+  Physical-robot tree: replan continuously, but do not clear the local map or
+  blindly retry after a real controller collision. Motion recovery is
+  intentionally absent here: the Robot
+  Agent selects a direction from a fresh LaserScan and every primitive is
+  independently checked against the full swept footprint. Automatic blind
+  reverse and spin are disabled for the passive-caster base.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <!--
-      One Nav2 recovery cycle is enough on the physical base.  A longer retry
-      loop kept a wedged chassis stationary for roughly 50 seconds before the
-      agent could run its independent scan-guarded escape.
-    -->
-    <RecoveryNode number_of_retries="1" name="NavigateRecovery">
-      <PipelineSequence name="NavigateWithConservativeReplanning">
+    <PipelineSequence name="NavigateWithConservativeReplanning">
         <ControllerSelector selected_controller="{selected_controller}"
                             default_controller="FollowPath"
                             topic_name="controller_selector"/>
         <PlannerSelector selected_planner="{selected_planner}"
                          default_planner="GridBased"
                          topic_name="planner_selector"/>
-        <RecoveryNode number_of_retries="1" name="ComputePathRecovery">
-          <RateController hz="1.0">
-            <Fallback>
-              <ReactiveSequence>
-                <Inverter>
-                  <GlobalUpdatedGoal/>
-                </Inverter>
-                <IsPathValid path="{path}"/>
-              </ReactiveSequence>
-              <ComputePathToPose goal="{goal}"
-                                 path="{path}"
-                                 planner_id="{selected_planner}"
-                                 error_code_id="{compute_path_error_code}"/>
-            </Fallback>
-          </RateController>
-          <ClearEntireCostmap
-            name="ClearGlobalCostmapForPlanner"
-            service_name="global_costmap/clear_entirely_global_costmap"/>
-        </RecoveryNode>
-        <RecoveryNode number_of_retries="1" name="FollowPathRecovery">
-          <FollowPath path="{path}"
-                      controller_id="{selected_controller}"
-                      error_code_id="{follow_path_error_code}"/>
-          <ClearEntireCostmap
-            name="ClearLocalCostmapForController"
-            service_name="local_costmap/clear_entirely_local_costmap"/>
-        </RecoveryNode>
-      </PipelineSequence>
-      <ReactiveFallback name="RecoveryFallback">
-        <GoalUpdated/>
-        <RoundRobin name="ConservativeRecoveryActions">
-          <BackUp backup_dist="0.12"
-                  backup_speed="0.08"
-                  time_allowance="4.0"
-                  error_code_id="{backup_error_code}"/>
-          <Sequence name="ClearBothCostmaps">
+        <RateController hz="1.0" name="RateControllerComputePathToPose">
+          <RecoveryNode number_of_retries="1" name="ComputePathRecovery">
+            <ComputePathToPose goal="{goal}"
+                               path="{path}"
+                               planner_id="{selected_planner}"
+                               error_code_id="{compute_path_error_code}"/>
             <ClearEntireCostmap
-              name="ClearLocalCostmap"
-              service_name="local_costmap/clear_entirely_local_costmap"/>
-            <ClearEntireCostmap
-              name="ClearGlobalCostmap"
+              name="ClearGlobalCostmapForPlanner"
               service_name="global_costmap/clear_entirely_global_costmap"/>
-          </Sequence>
-          <Wait wait_duration="1.0"/>
-        </RoundRobin>
-      </ReactiveFallback>
-    </RecoveryNode>
+          </RecoveryNode>
+        </RateController>
+        <FollowPath path="{path}"
+                    controller_id="{selected_controller}"
+                    error_code_id="{follow_path_error_code}"/>
+    </PipelineSequence>
   </BehaviorTree>
 </root>

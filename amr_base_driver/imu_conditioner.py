@@ -8,6 +8,7 @@ from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu
 
 from .imu_bias import StationaryBias
@@ -22,10 +23,14 @@ class ImuConditioner(Node):
         self.last_cmd = -100.0
         self.command_moving = False
         self.samples = 0
-        self.corrected = self.create_publisher(Imu, '/imu/data', 20)
+        self.corrected = self.create_publisher(
+            Imu, '/imu/data', qos_profile_sensor_data)
         self.diag = self.create_publisher(DiagnosticArray, '/diagnostics', 10)
-        self.create_subscription(Imu, '/imu/data_raw', self.on_imu, 20)
-        self.create_subscription(Odometry, '/wheel/odometry', self.on_odom, 20)
+        self.create_subscription(
+            Imu, '/imu/data_raw', self.on_imu, qos_profile_sensor_data)
+        self.create_subscription(
+            Odometry, '/wheel/odometry', self.on_odom,
+            qos_profile_sensor_data)
         self.create_subscription(Twist, '/cmd_vel_safe', self.on_cmd, 10)
         self.create_timer(1.0, self.diagnostics)
 

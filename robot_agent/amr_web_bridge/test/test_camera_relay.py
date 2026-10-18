@@ -1,20 +1,21 @@
 """Tests for the low-latency outbound camera relay."""
 
 import asyncio
-import struct
 from contextlib import suppress
 from pathlib import Path
+import struct
 
 import amr_web_bridge.camera_relay as camera_relay_module
 from amr_web_bridge.camera_relay import (
+    camera_frame_acknowledged,
     CAMERA_FRAME_HEADER,
     CAMERA_FRAME_MAGIC,
     CAMERA_FRAME_VERSION,
     CAMERA_MAX_IN_FLIGHT,
+    camera_stream_requested,
     CameraRelay,
     CapturedJpeg,
     LatestJpegSource,
-    camera_frame_acknowledged,
     pack_camera_frame,
 )
 
@@ -22,13 +23,20 @@ from amr_web_bridge.camera_relay import (
 class ChunkStream:
     def __init__(self, chunks):
         self.chunks = iter(chunks)
+        self.read1_calls = 0
 
     def read(self, _size):
+        raise AssertionError('MJPEG capture must not wait for a full buffer')
+
+    def read1(self, _size):
+        self.read1_calls += 1
         return next(self.chunks, b'')
 
 
 def test_mjpeg_source_keeps_only_the_latest_complete_frame():
     source = LatestJpegSource('http://127.0.0.1:8081/stream')
+    observed = []
+    source.set_frame_callback(observed.append)
     first = b'\xff\xd8first\xff\xd9'
     second = b'\xff\xd8second\xff\xd9'
     stream = ChunkStream([
@@ -46,6 +54,11 @@ def test_mjpeg_source_keeps_only_the_latest_complete_frame():
     assert source.frame.data == second
     assert source.frame.sequence == 2
     assert source.frame.captured_at_ns > 0
+    assert observed == [
+        CapturedJpeg(sequence=1, captured_at_ns=observed[0].captured_at_ns, data=first),
+        CapturedJpeg(sequence=2, captured_at_ns=observed[1].captured_at_ns, data=second),
+    ]
+    assert stream.read1_calls == 3
 
 
 def test_mjpeg_source_returns_new_frame_once_per_sequence():
@@ -93,18 +106,44 @@ def test_camera_frame_ack_must_match_the_one_frame_in_flight():
     assert not camera_frame_acknowledged('not-json', 9)
 
 
+def test_camera_demand_messages_control_local_capture():
+    assert camera_stream_requested(
+        '{"type":"camera_ready","stream_requested":false}'
+    ) is False
+    assert camera_stream_requested(
+        '{"type":"camera_demand","stream_requested":true}'
+    ) is True
+    assert camera_stream_requested(
+        '{"type":"camera_frame_ack","source_sequence":1}'
+    ) is None
+
+
 def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
+    assert CAMERA_MAX_IN_FLIGHT == 3
+
     class Source:
         def __init__(self):
             self.sequence = 0
+            self.active = None
+            self.frame_callback = None
 
-        def wait_for_frame(self, _after_sequence, _timeout):
+        def set_active(self, active):
+            self.active = active
+
+        def set_frame_callback(self, callback):
+            self.frame_callback = callback
+            if callback is not None:
+                self.emit()
+
+        def emit(self):
             self.sequence += 1
-            return CapturedJpeg(
+            frame = CapturedJpeg(
                 sequence=self.sequence,
                 captured_at_ns=self.sequence,
                 data=b'\xff\xd8frame\xff\xd9',
             )
+            if self.frame_callback is not None:
+                self.frame_callback(frame)
 
     class WebSocket:
         def __init__(self):
@@ -112,6 +151,7 @@ def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
             self.sent = []
             self.recv_counts_at_send = []
             self.two_sent = asyncio.Event()
+            self.source = None
 
         async def recv(self):
             self.recv_calls += 1
@@ -124,6 +164,8 @@ def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
             self.recv_counts_at_send.append(self.recv_calls)
             if len(self.sent) == CAMERA_MAX_IN_FLIGHT:
                 self.two_sent.set()
+            elif self.source is not None:
+                self.source.emit()
 
     class Connection:
         def __init__(self, websocket):
@@ -139,6 +181,7 @@ def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
         websocket = WebSocket()
         relay = CameraRelay('wss://example.test', Path('/tmp/unused'), '', 30)
         relay.source = Source()
+        websocket.source = relay.source
         original_connect = camera_relay_module.websockets.connect
         camera_relay_module.websockets.connect = (
             lambda *_args, **_kwargs: Connection(websocket)
@@ -150,6 +193,7 @@ def test_camera_relay_fills_bounded_wan_window_before_waiting_for_ack():
             await asyncio.wait_for(websocket.two_sent.wait(), timeout=1.0)
             assert len(websocket.sent) == CAMERA_MAX_IN_FLIGHT
             assert websocket.recv_counts_at_send == [1] * CAMERA_MAX_IN_FLIGHT
+            assert relay.source.active is True
         finally:
             task.cancel()
             with suppress(asyncio.CancelledError):

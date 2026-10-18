@@ -62,6 +62,13 @@ constexpr int MAX_PWM = 240;
 constexpr int PWM_STEP = 20;
 constexpr float MAX_COMMAND_RPM = 90.0f;
 
+// The drivetrain cannot regulate below roughly 12 RPM on the floor. Applying
+// the minimum running PWM to a 1-8 RPM request instead drives that wheel at
+// 15-25 RPM, turning a commanded one-wheel arc into almost straight motion.
+// Hold an untrackable wheel stopped so differential-drive curvature remains
+// physically meaningful; normal translation stays above this threshold.
+constexpr float MIN_TRACKABLE_RPM = 12.0f;
+
 // Static friction on the completed robot is much higher than on the bench.
 // Give each wheel a short, bounded kick when starting or reversing, then keep
 // enough PWM available for low-speed motion.  The right drivetrain required a
@@ -389,7 +396,7 @@ bool setupImu() {
 
 void updateWheel(WheelController &wheel, bool left, float target,
                  float feedForwardAt80, float dt) {
-  if (fabsf(target) < 0.5f) {
+  if (fabsf(target) < MIN_TRACKABLE_RPM) {
     if (left) ledcWrite(LEFT_ENA, 0); else ledcWrite(RIGHT_ENB, 0);
     wheel.pwm = 0;
     wheel.integral = 0;

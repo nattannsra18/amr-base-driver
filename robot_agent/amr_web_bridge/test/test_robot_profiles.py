@@ -43,6 +43,7 @@ def test_odroid_prototype_profile_uses_real_robot_interfaces():
     assert profile['diagnostics_topic'] == '/diagnostics'
     assert profile['emergency_stop_cmd_vel_topic'] == '/cmd_vel_stop'
     assert profile['manual_cmd_vel_topic'] == '/cmd_vel_manual'
+    assert profile['enable_blocked_pose_motion_recovery'] is False
     assert 'mapping' not in profile['agent_capabilities'].split(',')
     assert 'credential' not in profile
     assert 'token' not in profile

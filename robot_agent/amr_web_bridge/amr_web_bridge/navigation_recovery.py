@@ -162,12 +162,41 @@ class NavigationRecoveryRunner:
         )
         return succeeded, output
 
+    def guarded_forward(self) -> tuple[bool, str]:
+        """Request the fixed scan-guarded forward escape."""
+        ok, output = self._command([
+            'ros2', 'service', 'call',
+            '/guarded_forward_escape',
+            'std_srvs/srv/Trigger', '{}',
+        ], timeout=MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS)
+        normalized = output.lower().replace(' ', '')
+        succeeded = ok and (
+            'success=true' in normalized
+            or 'success:true' in normalized
+        )
+        return succeeded, output
+
     def guarded_arc(self, yaw: float) -> tuple[bool, str]:
         """Request a fixed scan/odometry-guarded rolling reverse arc."""
         side = 'left' if float(yaw) > 0.0 else 'right'
         ok, output = self._command([
             'ros2', 'service', 'call',
             f'/guarded_arc_escape_{side}',
+            'std_srvs/srv/Trigger', '{}',
+        ], timeout=MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS)
+        normalized = output.lower().replace(' ', '')
+        succeeded = ok and (
+            'success=true' in normalized
+            or 'success:true' in normalized
+        )
+        return succeeded, output
+
+    def guarded_forward_arc(self, yaw: float) -> tuple[bool, str]:
+        """Request a fixed scan/odometry-guarded rolling forward arc."""
+        side = 'left' if float(yaw) > 0.0 else 'right'
+        ok, output = self._command([
+            'ros2', 'service', 'call',
+            f'/guarded_forward_arc_escape_{side}',
             'std_srvs/srv/Trigger', '{}',
         ], timeout=MOTOR_FAULT_CLEAR_TIMEOUT_SECONDS)
         normalized = output.lower().replace(' ', '')

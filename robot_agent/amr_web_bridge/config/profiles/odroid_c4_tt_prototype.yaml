@@ -45,3 +45,11 @@ amr_web_bridge:
     path_max_poses: 500
     path_publish_period: 0.5
     emergency_stop_zero_rate: 10.0
+    # Simple navigation mode: Nav2 owns its bounded recovery. The Agent reports
+    # the final result and never adds reverse/spin/arc motion on its own.
+    enable_blocked_pose_motion_recovery: false
+    # Retained as an inert safety bound if supervised Agent recovery is enabled
+    # again for a controlled test.
+    max_blocked_pose_recovery_attempts: 2
+    near_goal_acceptance_distance_m: 0.20
+    near_goal_acceptance_requires_heading: false

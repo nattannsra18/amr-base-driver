@@ -5,17 +5,21 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction
 from launch.actions import IncludeLaunchDescription
 from launch.actions import RegisterEventHandler
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch_ros.actions import Node
+from launch_ros.actions import ComposableNodeContainer, Node
+from launch_ros.descriptions import ComposableNode, ParameterFile
+from nav2_common.launch import RewrittenYaml
 
 
 def generate_launch_description():
     base_share = get_package_share_directory('amr_base_driver')
     map_yaml = LaunchConfiguration('map_yaml')
     enable_motors = LaunchConfiguration('enable_motors')
+    start_base_hardware = LaunchConfiguration('start_base_hardware')
+    use_composition = LaunchConfiguration('use_composition')
     activate_after_initial_pose = LaunchConfiguration(
         'activate_after_initial_pose')
     start_localization = LaunchConfiguration('start_localization')
@@ -24,18 +28,34 @@ def generate_launch_description():
         'ekf_transform_time_offset')
     params_file = LaunchConfiguration('params_file')
 
+    # A raw params-file substitution configures the top-level composable node,
+    # but its internally-created costmap nodes do not receive their scoped
+    # parameters. Normalize the file the same way as Nav2's Jazzy bringup so
+    # /local_costmap/local_costmap and /global_costmap/global_costmap retain
+    # the physical footprint and frame settings under composition.
+    configured_params = ParameterFile(
+        RewrittenYaml(
+            source_file=params_file,
+            root_key='',
+            param_rewrites={},
+            convert_types=True,
+        ),
+        allow_substs=True,
+    )
+
     localization = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(base_share, 'launch', 'localization.launch.py')),
         launch_arguments={
             'map_yaml': map_yaml,
             'enable_motors': enable_motors,
+            'start_base_hardware': start_base_hardware,
             'ekf_transform_time_offset': ekf_transform_time_offset,
             'start_localization': start_localization,
         }.items(),
     )
 
-    common_parameters = [params_file]
+    common_parameters = [configured_params]
     controller = Node(
         package='nav2_controller',
         executable='controller_server',
@@ -89,7 +109,7 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(start_navigation),
         parameters=[
-            params_file,
+            configured_params,
             {'default_nav_to_pose_bt_xml': os.path.join(
                 base_share, 'behavior_trees',
                 'navigate_to_pose_conservative.xml')},
@@ -117,6 +137,96 @@ def generate_launch_description():
             ],
         }],
     )
+    lifecycle_nodes = [
+        'controller_server',
+        'planner_server',
+        'velocity_smoother',
+        'collision_monitor',
+        'behavior_server',
+        'bt_navigator',
+    ]
+    nav2_container = ComposableNodeContainer(
+        name='nav2_container',
+        namespace='',
+        package='rclcpp_components',
+        # Match Nav2 Jazzy's supported composed bringup. The generic
+        # multi-threaded container can race lifecycle preshutdown callbacks
+        # and abort while systemd is stopping or restarting navigation.
+        executable='component_container_isolated',
+        output='screen',
+        condition=IfCondition(use_composition),
+        # Load the complete parameter file into the container process. The
+        # LoadNode service only forwards parameters matching the top-level
+        # component name, while controller_server and planner_server create
+        # their costmap nodes internally.
+        parameters=[configured_params],
+        composable_node_descriptions=[
+            ComposableNode(
+                package='nav2_controller',
+                plugin='nav2_controller::ControllerServer',
+                name='controller_server',
+                parameters=common_parameters,
+                remappings=[('cmd_vel', '/cmd_vel_nav')],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+            ComposableNode(
+                package='nav2_planner',
+                plugin='nav2_planner::PlannerServer',
+                name='planner_server',
+                parameters=common_parameters,
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+            ComposableNode(
+                package='nav2_velocity_smoother',
+                plugin='nav2_velocity_smoother::VelocitySmoother',
+                name='velocity_smoother',
+                parameters=common_parameters,
+                remappings=[
+                    ('cmd_vel', '/cmd_vel_nav'),
+                    ('cmd_vel_smoothed', '/cmd_vel_smoothed'),
+                ],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+            ComposableNode(
+                package='nav2_collision_monitor',
+                plugin='nav2_collision_monitor::CollisionMonitor',
+                name='collision_monitor',
+                parameters=common_parameters,
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+            ComposableNode(
+                package='nav2_behaviors',
+                plugin='behavior_server::BehaviorServer',
+                name='behavior_server',
+                parameters=common_parameters,
+                remappings=[('cmd_vel', '/cmd_vel_nav')],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+            ComposableNode(
+                package='nav2_bt_navigator',
+                plugin='nav2_bt_navigator::BtNavigator',
+                name='bt_navigator',
+                parameters=[
+                    configured_params,
+                    {'default_nav_to_pose_bt_xml': os.path.join(
+                        base_share,
+                        'behavior_trees',
+                        'navigate_to_pose_conservative.xml')},
+                ],
+                extra_arguments=[{'use_intra_process_comms': True}],
+            ),
+            ComposableNode(
+                package='nav2_lifecycle_manager',
+                plugin='nav2_lifecycle_manager::LifecycleManager',
+                name='lifecycle_manager_navigation',
+                parameters=[{
+                    'autostart': False,
+                    'bond_timeout': 10.0,
+                    'node_names': lifecycle_nodes,
+                }],
+            ),
+        ],
+    )
     activation_gate = Node(
         package='amr_base_driver',
         executable='nav2_activation_gate',
@@ -139,13 +249,19 @@ def generate_launch_description():
         parameters=[{'request_startup': False}],
     )
     navigation_processes = GroupAction(actions=[
-        controller,
-        planner,
-        velocity_smoother,
-        collision_monitor,
-        behavior_server,
-        bt_navigator,
-        lifecycle_manager,
+        GroupAction(
+            condition=UnlessCondition(use_composition),
+            actions=[
+                controller,
+                planner,
+                velocity_smoother,
+                collision_monitor,
+                behavior_server,
+                bt_navigator,
+                lifecycle_manager,
+            ],
+        ),
+        nav2_container,
         activation_gate,
     ])
     start_navigation_when_localized = RegisterEventHandler(
@@ -176,6 +292,17 @@ def generate_launch_description():
             description=(
                 'Keep false for costmap and planning validation. Enable only '
                 'for an attended floor test with the motor cutoff ready.')),
+        DeclareLaunchArgument(
+            'start_base_hardware', default_value='true',
+            description=(
+                'Start base hardware inside this launch. The systemd boot '
+                'deployment uses its dedicated critical service instead.')),
+        DeclareLaunchArgument(
+            'use_composition', default_value='false',
+            description=(
+                'Run the Nav2 C++ nodes in one multi-threaded component '
+                'container to reduce DDS participants. Keep false on the '
+                'ODROID until composed shutdown no longer hangs.')),
         DeclareLaunchArgument(
             'activate_after_initial_pose', default_value='true',
             description=(

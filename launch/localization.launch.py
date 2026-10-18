@@ -15,6 +15,7 @@ def generate_launch_description():
 
     map_file = LaunchConfiguration('map_yaml')
     enable_motors = LaunchConfiguration('enable_motors')
+    start_base_hardware = LaunchConfiguration('start_base_hardware')
     start_localization = LaunchConfiguration('start_localization')
     ekf_transform_time_offset = LaunchConfiguration(
         'ekf_transform_time_offset')
@@ -24,8 +25,11 @@ def generate_launch_description():
             os.path.join(base_share, 'launch', 'base_hardware.launch.py')),
         launch_arguments={
             'enable_motors': enable_motors,
+            'enable_base_control': start_base_hardware,
+            'enable_support': 'true',
             'publish_sensor_tf': 'true',
             'ekf_transform_time_offset': ekf_transform_time_offset,
+            'enable_black_box': 'false',
         }.items(),
     )
     lidar = Node(
@@ -103,6 +107,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_motors', default_value='false',
             description='Unlock motion only for an attended localization test.'),
+        DeclareLaunchArgument(
+            'start_base_hardware', default_value='true',
+            description=(
+                'Start motor command and serial nodes in this launch. The '
+                'boot deployment sets false because its critical base '
+                'service owns those two nodes.')),
         DeclareLaunchArgument(
             'ekf_transform_time_offset', default_value='0.10',
             description=(

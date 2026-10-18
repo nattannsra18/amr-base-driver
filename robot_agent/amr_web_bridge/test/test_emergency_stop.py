@@ -53,6 +53,7 @@ def bridge():
     value.navigation_command_rejection = (
         lambda message: WebBridgeNode.navigation_command_rejection(value, message)
     )
+    value.navigation_readiness_rejection = lambda: None
     value.command_status_payload = (
         lambda command, lifecycle, detail: WebBridgeNode.command_status_payload(
             value, command, lifecycle, detail,
@@ -184,6 +185,85 @@ def test_navigation_rejects_expired_foreign_and_incompatible_commands():
         assert value.command_queue.empty()
         assert value.sent[-1]['accepted'] is False
         assert detail in value.sent[-1]['detail']
+
+
+def test_navigation_is_rejected_until_initial_pose_is_available():
+    value = bridge()
+    value.active_command = None
+    value.localization_snapshot = lambda: {
+        'health': 'LOST',
+        'reason': 'NO_POSE',
+        'amcl_state': 'ACTIVE',
+        'tf_available': False,
+        'detail': 'No AMCL pose has been received',
+    }
+    value.motor_fault_snapshot = lambda: {
+        'mcu_fault': 0,
+        'motors_enabled': True,
+    }
+    value.navigation_readiness_rejection = (
+        lambda: WebBridgeNode.navigation_readiness_rejection(value)
+    )
+
+    asyncio.run(WebBridgeNode.queue_navigation_command(
+        value, object(), navigation_command(),
+    ))
+
+    assert value.command_queue.empty()
+    assert value.sent[-1]['accepted'] is False
+    assert value.sent[-1]['detail'].startswith('Initial Pose is required')
+
+
+def test_navigation_is_rejected_when_motor_diagnostics_are_unavailable():
+    value = bridge()
+    value.active_command = None
+    value.localization_snapshot = lambda: {
+        'health': 'LOCALIZED',
+        'reason': 'READY',
+        'amcl_state': 'ACTIVE',
+        'tf_available': True,
+        'detail': 'ready',
+    }
+    value.motor_fault_snapshot = lambda: None
+    value.navigation_readiness_rejection = (
+        lambda: WebBridgeNode.navigation_readiness_rejection(value)
+    )
+
+    asyncio.run(WebBridgeNode.queue_navigation_command(
+        value, object(), navigation_command(),
+    ))
+
+    assert value.command_queue.empty()
+    assert value.sent[-1]['accepted'] is False
+    assert 'Fresh ESP32 motor diagnostics' in value.sent[-1]['detail']
+
+
+def test_navigation_is_rejected_when_esp32_telemetry_is_not_fresh():
+    value = bridge()
+    value.active_command = None
+    value.localization_snapshot = lambda: {
+        'health': 'LOCALIZED',
+        'reason': 'READY',
+        'amcl_state': 'ACTIVE',
+        'tf_available': True,
+        'detail': 'ready',
+    }
+    value.motor_fault_snapshot = lambda: {
+        'mcu_fault': 0,
+        'motors_enabled': True,
+        'telemetry_fresh': False,
+    }
+    value.navigation_readiness_rejection = (
+        lambda: WebBridgeNode.navigation_readiness_rejection(value)
+    )
+
+    asyncio.run(WebBridgeNode.queue_navigation_command(
+        value, object(), navigation_command(),
+    ))
+
+    assert value.command_queue.empty()
+    assert value.sent[-1]['accepted'] is False
+    assert 'telemetry is not fresh' in value.sent[-1]['detail']
 
 
 def test_navigation_command_id_is_idempotent_after_leaving_queue():

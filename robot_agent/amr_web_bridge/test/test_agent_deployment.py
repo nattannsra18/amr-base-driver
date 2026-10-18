@@ -17,6 +17,9 @@ def test_systemd_service_starts_agent_from_external_profile_and_env():
     assert 'Restart=always' in service
     assert 'NoNewPrivileges=false' in service
     assert 'ReadWritePaths=/var/lib/indoor-delivery-robot' in service
+    assert 'Nice=5' in service
+    assert 'CPUWeight=100' in service
+    assert 'AllowedCPUs=0-2' in service
 
 
 def test_camera_relay_is_separate_hardened_outbound_service():
@@ -32,7 +35,9 @@ def test_camera_relay_is_separate_hardened_outbound_service():
     assert 'NoNewPrivileges=true' in service
     assert 'Restart=always' in service
     assert 'CPUQuota=' not in service
-    assert 'Nice=0' in service
+    assert 'Nice=10' in service
+    assert 'CPUWeight=10' in service
+    assert 'AllowedCPUs=0-2' in service
 
 
 def test_camera_capture_prioritizes_stable_low_latency_frames():
@@ -50,7 +55,9 @@ def test_camera_capture_prioritizes_stable_low_latency_frames():
     assert '--resolution=${CAMERA_RESOLUTION}' in service
     assert 'exposure_dynamic_framerate=${CAMERA_DYNAMIC_FRAMERATE}' in service
     assert 'CPUQuota=' not in service
-    assert 'Nice=0' in service
+    assert 'Nice=10' in service
+    assert 'CPUWeight=10' in service
+    assert 'AllowedCPUs=0-2' in service
     assert 'CAMERA_DYNAMIC_FRAMERATE=0' in environment
     assert 'CAMERA_RESOLUTION=352x288' in environment
 

@@ -1,0 +1,29 @@
+[Unit]
+Description=Indoor Delivery Robot Critical Base Control
+Documentation=https://github.com/nattannsra18/amr-base-driver
+After=network-online.target systemd-udev-settle.service
+Wants=network-online.target systemd-udev-settle.service
+Before=indoor-delivery-robot-navigation.service indoor-delivery-robot-agent.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Slice=indoor-delivery-robot-critical.slice
+User=odroid
+Group=odroid
+SupplementaryGroups=dialout
+WorkingDirectory=/home/odroid/amr_ws
+EnvironmentFile=/etc/indoor-delivery-robot/navigation.env
+ExecStartPre=/usr/bin/test -c /dev/ttyAML6
+ExecStart=/usr/local/sbin/indoor-delivery-robot-base
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGINT
+Nice=-5
+CPUWeight=1000
+AllowedCPUs=3
+
+[Install]
+WantedBy=multi-user.target
