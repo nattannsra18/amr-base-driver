@@ -20,7 +20,7 @@ def test_systemd_service_starts_agent_from_external_profile_and_env():
     assert '/run/lock' in service
     assert 'Nice=5' in service
     assert 'CPUWeight=100' in service
-    assert 'AllowedCPUs=0-2' in service
+    assert 'AllowedCPUs=0-1' in service
 
 
 def test_agent_embeds_low_overhead_black_box_recorder():

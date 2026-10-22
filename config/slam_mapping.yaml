@@ -23,7 +23,7 @@ slam_toolbox:
     transform_publish_period: 0.05
     map_update_interval: 2.0
     # Bag-tested mapping profile; retain obstacle thresholds, refine grid only.
-    resolution: 0.03
+    resolution: 0.02
     minimum_time_interval: 0.10
     transform_timeout: 0.30
     tf_buffer_duration: 30.0

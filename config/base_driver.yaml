@@ -26,9 +26,9 @@ amr_base_serial_bridge:
     # Nav2's bounded internal recovery can take about 15 seconds before the
     # Agent receives the final abort. Keep the evidence long enough to hand off.
     stall_guard_recent_seconds: 30.0
-    # The firmware emits telemetry every 50 ms (20 Hz). Publish every sample so
-    # odometry and IMU stay aligned with the EKF's configured 20 Hz update rate.
-    telemetry_publish_divisor: 1
+    # Drain UART at the full 20 Hz for safety, but publish ROS sensor messages
+    # at 10 Hz to leave CPU headroom for Nav2 and DDS on the four-core ODROID.
+    telemetry_publish_divisor: 2
     enable_motors: false
     odom_frame: odom
     base_frame: base_footprint

@@ -21,6 +21,7 @@
     - CLEAR releases a latched fault only while commanded speed is zero.
 */
 #include <Arduino.h>
+#include <esp_system.h>
 #include <Wire.h>
 #include <math.h>
 #include <stdlib.h>
@@ -197,6 +198,7 @@ uint32_t lastTelemetryMs = 0;
 uint32_t lastLeftEdgeMs = 0;
 uint32_t lastRightEdgeMs = 0;
 uint32_t telemetrySequence = 0;
+uint8_t resetReason = 0;
 
 char inputLine[96];
 size_t inputLength = 0;
@@ -678,6 +680,7 @@ void publishTelemetry() {
   frame.temperatureCenti = scaledInt16(imu.temp, 100.0f);
   frame.flags = flags;
   frame.fault = uint8_t(faultCode);
+  frame.reserved = resetReason;
   frame.crc = crc16Ccitt(reinterpret_cast<const uint8_t *>(&frame),
                         sizeof(frame) - sizeof(frame.crc));
   if (RobotSerial.availableForWrite() < int(sizeof(frame))) return;
@@ -685,6 +688,7 @@ void publishTelemetry() {
 }
 
 void setup() {
+  resetReason = uint8_t(esp_reset_reason());
   const int outputPins[] = {LEFT_ENA, LEFT_IN1, LEFT_IN2,
                             RIGHT_ENB, RIGHT_IN3, RIGHT_IN4, MOTOR_STBY};
   for (int pin : outputPins) {

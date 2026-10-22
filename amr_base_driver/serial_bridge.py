@@ -155,6 +155,7 @@ class SerialBridge(Node):
         self.maximum_mcu_telemetry_gap_ms = 0
         self.missed_telemetry_frames = 0
         self.mcu_restart_count = 0
+        self.mcu_reset_reason = 0
         self.diagnostic_requested = False
         self.parse_errors = 0
         self.mcu_flags = 0
@@ -334,6 +335,13 @@ class SerialBridge(Node):
 
     def serial_reader_loop(self):
         """Drain UART independently from the ROS executor."""
+        try:
+            allowed_cpus = os.sched_getaffinity(0)
+            if len(allowed_cpus) > 1:
+                os.sched_setaffinity(0, {max(allowed_cpus)})
+        except (AttributeError, OSError):
+            # Affinity is only an optimization; serial safety must not depend on it.
+            pass
         while not self.reader_stop.is_set():
             with self.serial_lock:
                 descriptor = self.serial_port
@@ -553,6 +561,7 @@ class SerialBridge(Node):
         self.imu_angular_z_rps = gyro[2] * math.pi / 180.0
         self.temperature = values[15] / 100.0
         received_at = time.monotonic()
+        telemetry_restarted = False
         with self.telemetry_lock:
             previous_mcu_fault = self.mcu_fault
             if self.last_telemetry_monotonic:
@@ -569,6 +578,7 @@ class SerialBridge(Node):
             )
             if telemetry_restarted:
                 self.mcu_restart_count += 1
+                self.diagnostic_requested = True
             else:
                 if self.previous_telemetry_sequence is not None:
                     sequence_delta = (
@@ -588,6 +598,7 @@ class SerialBridge(Node):
             self.previous_telemetry_mcu_ms = mcu_ms
             self.mcu_flags = values[16]
             self.mcu_fault = values[17]
+            self.mcu_reset_reason = values[18]
             self.encoder_left_count = left_count
             self.encoder_right_count = right_count
             self.measured_left_rpm = left_rpm
@@ -607,6 +618,11 @@ class SerialBridge(Node):
             }
             if self.mcu_fault != previous_mcu_fault:
                 self.diagnostic_requested = True
+        if telemetry_restarted:
+            self.get_logger().error(
+                'ESP32 telemetry counter restarted '
+                f'(reset reason {self.mcu_reset_reason})'
+            )
 
     def publish_imu(self, stamp, accel_g, gyro_dps):
         degree_to_radian = math.pi / 180.0
@@ -760,6 +776,9 @@ class SerialBridge(Node):
             KeyValue(
                 key='mcu_restart_count',
                 value=str(self.mcu_restart_count)),
+            KeyValue(
+                key='mcu_reset_reason',
+                value=str(self.mcu_reset_reason)),
         ]
 
         mcu = DiagnosticStatus()
@@ -774,9 +793,28 @@ class SerialBridge(Node):
         else:
             mcu.level = DiagnosticStatus.OK
             mcu.message = 'No MCU fault'
+        reset_names = {
+            0: 'UNKNOWN',
+            1: 'POWER_ON',
+            2: 'EXTERNAL',
+            3: 'SOFTWARE',
+            4: 'PANIC',
+            5: 'INT_WDT',
+            6: 'TASK_WDT',
+            7: 'WDT',
+            8: 'DEEP_SLEEP',
+            9: 'BROWNOUT',
+            10: 'SDIO',
+        }
         mcu.values = [
             KeyValue(key='mcu_flags', value=str(self.mcu_flags)),
             KeyValue(key='mcu_fault', value=str(self.mcu_fault)),
+            KeyValue(
+                key='mcu_reset_reason',
+                value=reset_names.get(
+                    self.mcu_reset_reason,
+                    f'OTHER_{self.mcu_reset_reason}',
+                )),
             KeyValue(key='imu_temperature_c', value=f'{self.temperature:.2f}'),
         ]
 

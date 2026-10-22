@@ -23,11 +23,11 @@ def test_crc16_ccitt_false_reference_vector():
     assert crc16_ccitt(b'123456789') == 0x29B1
 
 
-def telemetry_frame(mcu_ms=100, sequence=1):
+def telemetry_frame(mcu_ms=100, sequence=1, reset_reason=0):
     values = (
         0xA55A, 1, TELEMETRY_LENGTH, sequence, mcu_ms,
         10, 20, 100, 200,
-        0, 0, 1000, 0, 0, 0, 2500, 7, 0, 0, 0,
+        0, 0, 1000, 0, 0, 0, 2500, 7, 0, reset_reason, 0,
     )
     frame = bytearray(struct.pack(TELEMETRY_FORMAT, *values))
     frame[-2:] = crc16_ccitt(frame[:-2]).to_bytes(2, 'little')
@@ -35,6 +35,7 @@ def telemetry_frame(mcu_ms=100, sequence=1):
 
 
 def telemetry_state():
+    errors = []
     return SimpleNamespace(
         telemetry_lock=threading.Lock(),
         imu_angular_z_rps=0.0,
@@ -55,8 +56,11 @@ def telemetry_state():
         maximum_mcu_telemetry_gap_ms=0,
         missed_telemetry_frames=0,
         mcu_restart_count=0,
+        mcu_reset_reason=0,
         diagnostic_requested=False,
         parse_errors=0,
+        get_logger=lambda: SimpleNamespace(error=errors.append),
+        logged_errors=errors,
     )
 
 
@@ -69,6 +73,15 @@ def test_uart_reader_records_latest_frame_without_ros_publish():
     assert node.telemetry_revision == 1
     assert node.latest_telemetry['left_count'] == 10
     assert node.latest_telemetry['right_rpm'] == 2.0
+
+
+def test_uart_reader_records_mcu_reset_reason_from_reserved_byte():
+    node = telemetry_state()
+
+    SerialBridge.handle_telemetry_frame(
+        node, telemetry_frame(reset_reason=9))
+
+    assert node.mcu_reset_reason == 9
 
 
 def test_uart_reader_counts_interframe_gap_overruns(monkeypatch):
@@ -98,6 +111,8 @@ def test_uart_reader_counts_mcu_restart_without_overflowing_gap_metrics(
 
     assert node.telemetry_gap_overrun_count == 1
     assert node.mcu_restart_count == 1
+    assert node.diagnostic_requested is True
+    assert 'ESP32 telemetry counter restarted' in node.logged_errors[0]
     assert node.maximum_mcu_telemetry_gap_ms == 0
     assert node.missed_telemetry_frames == 0
 
@@ -186,7 +201,7 @@ def test_sensor_publish_rate_keeps_odometry_aligned_with_ekf():
         (Path(__file__).parents[1] / 'config' / 'base_driver.yaml').read_text()
     )
     params = config['amr_base_serial_bridge']['ros__parameters']
-    assert params['telemetry_publish_divisor'] == 1
+    assert params['telemetry_publish_divisor'] == 2
     assert params['straight_trim_gain'] == 0.15
     assert params['straight_trim_max_rpm'] == 3.0
     assert params['stall_guard_enabled'] is False
