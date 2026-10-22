@@ -29,6 +29,7 @@ from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
+from rclpy.parameter_client import AsyncParameterClient
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -665,6 +666,17 @@ class WebBridgeNode(Node):
             self,
             NavigateToPose,
             self.navigate_action,
+        )
+        # A persistent parameter client applies the requested delivery profile
+        # before each goal.  Keeping it in-process avoids shelling out to
+        # ``ros2 param`` on the timing-sensitive navigation path.
+        self.navigation_controller_parameters = AsyncParameterClient(
+            self,
+            '/controller_server',
+        )
+        self.navigation_smoother_parameters = AsyncParameterClient(
+            self,
+            '/velocity_smoother',
         )
         self.preview_client = ActionClient(
             self,
@@ -4476,6 +4488,13 @@ class WebBridgeNode(Node):
             and math.isfinite(float(max_linear_speed))
             and 0.08 <= float(max_linear_speed) <= 0.30
         )
+        max_angular_speed = message.get('max_angular_speed', 0.60)
+        valid_angular_speed = (
+            isinstance(max_angular_speed, (int, float))
+            and not isinstance(max_angular_speed, bool)
+            and math.isfinite(float(max_angular_speed))
+            and 0.40 <= float(max_angular_speed) <= 1.00
+        )
         valid_command = (
             isinstance(command_id, str)
             and bool(command_id)
@@ -4485,6 +4504,7 @@ class WebBridgeNode(Node):
             and stage in {'pickup', 'destination'}
             and valid_target
             and valid_speed
+            and valid_angular_speed
         )
 
         if not valid_command:
@@ -5406,9 +5426,137 @@ class WebBridgeNode(Node):
             self.clear_active_command(command_id)
             return
 
-        self.publish_navigation_speed_limit(
-            float(command.get('max_linear_speed', 0.10))
+        if (
+            not self.navigation_controller_parameters.services_are_ready()
+            or not self.navigation_smoother_parameters.services_are_ready()
+        ):
+            detail = 'Nav2 delivery speed parameter service is unavailable'
+            self.get_logger().error(detail)
+            self.send_command_ack(command, False, detail)
+            self.send_navigation_result(command, 'aborted', detail)
+            self.clear_active_command(command_id)
+            return
+
+        linear_speed = min(
+            0.30,
+            max(0.08, float(command.get('max_linear_speed', 0.10))),
         )
+        angular_speed = min(
+            1.00,
+            max(0.40, float(command.get('max_angular_speed', 0.60))),
+        )
+        profile_future = self.navigation_controller_parameters.set_parameters(
+            [
+                Parameter(
+                    'FollowPath.desired_linear_vel',
+                    value=linear_speed,
+                ),
+                Parameter(
+                    'FollowPath.rotate_to_heading_angular_vel',
+                    value=angular_speed,
+                ),
+            ]
+        )
+        profile_future.add_done_callback(
+            lambda future: self.navigation_profile_callback(
+                future,
+                command,
+                linear_speed,
+                angular_speed,
+            )
+        )
+
+    def navigation_profile_callback(
+        self,
+        future: Any,
+        command: dict[str, Any],
+        linear_speed: float,
+        angular_speed: float,
+    ) -> None:
+        """Send a goal only after Nav2 accepted its per-delivery profile."""
+        command_id = str(command['command_id'])
+        try:
+            response = future.result()
+            failed = [
+                result.reason or 'parameter update was rejected'
+                for result in response.results
+                if not result.successful
+            ]
+        except Exception as error:
+            failed = [str(error)]
+
+        if failed:
+            detail = (
+                'Nav2 rejected the delivery speed profile: '
+                + '; '.join(failed)
+            )[:500]
+            self.get_logger().error(detail)
+            self.send_command_ack(command, False, detail)
+            self.send_navigation_result(command, 'aborted', detail)
+            self.clear_active_command(command_id)
+            return
+
+        smoother_future = self.navigation_smoother_parameters.set_parameters(
+            [
+                Parameter(
+                    'max_velocity',
+                    value=[linear_speed, 0.0, angular_speed],
+                ),
+                Parameter(
+                    'min_velocity',
+                    value=[-0.06, 0.0, -angular_speed],
+                ),
+            ]
+        )
+        smoother_future.add_done_callback(
+            lambda smoother_result: self.navigation_smoother_profile_callback(
+                smoother_result,
+                command,
+                linear_speed,
+                angular_speed,
+            )
+        )
+
+    def navigation_smoother_profile_callback(
+        self,
+        future: Any,
+        command: dict[str, Any],
+        linear_speed: float,
+        angular_speed: float,
+    ) -> None:
+        """Complete the profile only when the output limiter accepted it."""
+        command_id = str(command['command_id'])
+        try:
+            response = future.result()
+            failed = [
+                result.reason or 'parameter update was rejected'
+                for result in response.results
+                if not result.successful
+            ]
+        except Exception as error:
+            failed = [str(error)]
+
+        if failed:
+            detail = (
+                'Nav2 velocity smoother rejected the delivery speed profile: '
+                + '; '.join(failed)
+            )[:500]
+            self.get_logger().error(detail)
+            self.send_command_ack(command, False, detail)
+            self.send_navigation_result(command, 'aborted', detail)
+            self.clear_active_command(command_id)
+            return
+
+        self.publish_navigation_speed_limit(linear_speed)
+        self.get_logger().info(
+            'Applied Nav2 delivery profile '
+            f'{linear_speed:.2f} m/s, {angular_speed:.2f} rad/s'
+        )
+        self.send_navigation_goal(command)
+
+    def send_navigation_goal(self, command: dict[str, Any]) -> None:
+        """Submit the goal after all pre-navigation checks have passed."""
+        command_id = str(command['command_id'])
         goal = self.build_navigation_goal(command)
         command['_navigation_started_monotonic'] = time.monotonic()
         self.get_logger().info(

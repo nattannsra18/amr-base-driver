@@ -99,10 +99,11 @@ def test_local_and_global_costmaps_use_measured_footprint():
         assert costmap['footprint_padding'] == 0.02
 
 
-def test_initial_velocity_and_acceleration_limits_are_conservative():
+def test_initial_velocity_limits_match_the_web_delivery_caps():
     params = load_nav2_params()
     smoother = params['velocity_smoother']['ros__parameters']
-    assert smoother['max_velocity'] == [0.10, 0.0, 0.60]
+    assert smoother['max_velocity'] == [0.30, 0.0, 1.00]
+    assert smoother['min_velocity'] == [-0.06, 0.0, -1.00]
     assert smoother['max_accel'] == [0.10, 0.0, 0.40]
     assert smoother['max_decel'] == [-0.15, 0.0, -0.50]
 
@@ -114,8 +115,8 @@ def test_controller_uses_regulated_pure_pursuit_without_reversing():
     )
     controller = params['controller_server']['ros__parameters']['FollowPath']
     assert controller['plugin'].endswith('RegulatedPurePursuitController')
-    assert controller['desired_linear_vel'] == 0.15
-    assert controller['rotate_to_heading_angular_vel'] == 0.60
+    assert controller['desired_linear_vel'] == 0.30
+    assert controller['rotate_to_heading_angular_vel'] == 1.00
     assert controller['max_angular_accel'] == 6.0
     assert controller['allow_reversing'] is False
     assert controller['use_rotate_to_heading'] is True

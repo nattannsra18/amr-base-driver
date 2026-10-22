@@ -59,7 +59,8 @@ def telemetry_state():
         mcu_reset_reason=0,
         diagnostic_requested=False,
         parse_errors=0,
-        get_logger=lambda: SimpleNamespace(error=errors.append),
+        get_logger=lambda: SimpleNamespace(
+            error=errors.append, info=lambda _message: None),
         logged_errors=errors,
     )
 

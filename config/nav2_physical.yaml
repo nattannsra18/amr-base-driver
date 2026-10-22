@@ -27,12 +27,12 @@ controller_server:
 
     FollowPath:
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.15
+      desired_linear_vel: 0.30
       lookahead_dist: 0.30
       min_lookahead_dist: 0.20
       max_lookahead_dist: 0.45
       lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 0.60
+      rotate_to_heading_angular_vel: 1.00
       transform_tolerance: 0.20
       use_velocity_scaled_lookahead_dist: true
       min_approach_linear_velocity: 0.05
@@ -187,8 +187,8 @@ velocity_smoother:
     stamp_smoothed_velocity_with_smoothing_time: false
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.10, 0.0, 0.60]
-    min_velocity: [-0.06, 0.0, -0.60]
+    max_velocity: [0.30, 0.0, 1.00]
+    min_velocity: [-0.06, 0.0, -1.00]
     max_accel: [0.10, 0.0, 0.40]
     max_decel: [-0.15, 0.0, -0.50]
     odom_topic: /odometry/filtered

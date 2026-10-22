@@ -278,6 +278,18 @@ def test_navigation_rejects_invalid_speed_ceiling():
         assert value.sent[-1]['accepted'] is False
 
 
+def test_navigation_rejects_invalid_turn_speed_ceiling():
+    for speed in (True, 0.39, 1.01, float('nan')):
+        value = bridge()
+        asyncio.run(WebBridgeNode.queue_navigation_command(
+            value,
+            object(),
+            navigation_command(max_angular_speed=speed),
+        ))
+        assert value.command_queue.empty()
+        assert value.sent[-1]['accepted'] is False
+
+
 def test_navigation_command_id_is_idempotent_after_leaving_queue():
     value = bridge()
     value.active_command = None
