@@ -6,6 +6,7 @@
   <maintainer email="nattanns18@example.com">nattanns18</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>action_msgs</exec_depend>
   <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>launch</exec_depend>
@@ -16,6 +17,7 @@
   <exec_depend>nav2_bt_navigator</exec_depend>
   <exec_depend>nav2_behaviors</exec_depend>
   <exec_depend>nav2_collision_monitor</exec_depend>
+  <exec_depend>nav2_common</exec_depend>
   <exec_depend>nav2_controller</exec_depend>
   <exec_depend>nav2_lifecycle_manager</exec_depend>
   <exec_depend>nav2_map_server</exec_depend>

@@ -100,19 +100,43 @@ def make_bridge():
     bridge.diagnostics_stale_after_seconds = 3.0
     bridge.diagnostics_expire_after_seconds = 60.0
     bridge.scan_lock = threading.Lock()
+    bridge.blocked_start_recovery_lock = threading.Lock()
+    bridge.drive_stall_event_pending = False
     bridge.latest_scan = None
     bridge.last_scan_monotonic = None
     return bridge
 
 
-def diagnostics_message(name, hardware_id='robot01'):
+def test_drive_blocked_diagnostic_is_latched_until_worker_consumes_it():
+    bridge = make_bridge()
+
+    bridge.diagnostics_callback(diagnostics_message(
+        'Base drive telemetry',
+        values=[KeyValue(key='drive_blocked', value='True')],
+    ))
+    bridge.diagnostics_callback(diagnostics_message(
+        'Base drive telemetry',
+        values=[KeyValue(key='drive_blocked', value='False')],
+    ))
+
+    assert bridge.drive_stall_event_pending is True
+
+
+def diagnostics_message(
+    name,
+    hardware_id='robot01',
+    values=None,
+    *,
+    level=DiagnosticStatus.OK,
+    status_message='Healthy',
+):
     message = DiagnosticArray()
     status = DiagnosticStatus()
     status.name = name
     status.hardware_id = hardware_id
-    status.level = DiagnosticStatus.OK
-    status.message = 'Healthy'
-    status.values = [KeyValue(key='Topic', value='/example')]
+    status.level = level
+    status.message = status_message
+    status.values = values or [KeyValue(key='Topic', value='/example')]
     message.status = [status]
     return message
 
@@ -182,6 +206,94 @@ def test_diagnostics_callback_merges_independent_publishers():
         '_received_at' not in status
         for status in snapshot['statuses']
     )
+
+
+def test_motor_fault_snapshot_combines_mcu_and_drive_diagnostics():
+    bridge = make_bridge()
+    bridge.diagnostics_callback(diagnostics_message(
+        'ESP32 MCU fault', values=[KeyValue(key='mcu_fault', value='0')],
+    ))
+    bridge.diagnostics_callback(diagnostics_message(
+        'Base drive telemetry', values=[
+            KeyValue(key='motors_enabled', value='True'),
+        ],
+    ))
+    bridge.diagnostics_callback(diagnostics_message(
+        'Base serial telemetry',
+        status_message='Fresh telemetry',
+    ))
+
+    assert WebBridgeNode.motor_fault_snapshot(bridge) == {
+        'mcu_fault': 0,
+        'motors_enabled': True,
+        'telemetry_fresh': True,
+        'drive_blocked': False,
+        'drive_stall_recent': False,
+    }
+
+
+def test_motor_fault_snapshot_accepts_host_wheel_feedback_name():
+    bridge = make_bridge()
+    bridge.diagnostics_callback(diagnostics_message(
+        'ESP32 MCU fault', values=[KeyValue(key='mcu_fault', value='0')],
+    ))
+    bridge.diagnostics_callback(diagnostics_message(
+        'Host wheel feedback', values=[
+            KeyValue(key='motors_enabled', value='True'),
+            KeyValue(key='drive_blocked', value='False'),
+        ],
+    ))
+    bridge.diagnostics_callback(diagnostics_message(
+        'Base serial telemetry',
+        status_message='Fresh telemetry',
+    ))
+
+    snapshot = WebBridgeNode.motor_fault_snapshot(bridge)
+    assert snapshot is not None
+    assert snapshot['motors_enabled'] is True
+    assert snapshot['mcu_fault'] == 0
+    assert snapshot['telemetry_fresh'] is True
+
+
+def test_motor_fault_snapshot_rejects_nonfresh_serial_telemetry():
+    bridge = make_bridge()
+    bridge.diagnostics_callback(diagnostics_message(
+        'ESP32 MCU fault', values=[KeyValue(key='mcu_fault', value='0')],
+    ))
+    bridge.diagnostics_callback(diagnostics_message(
+        'Base drive telemetry', values=[
+            KeyValue(key='motors_enabled', value='True'),
+        ],
+    ))
+    bridge.diagnostics_callback(diagnostics_message(
+        'Base serial telemetry',
+        level=DiagnosticStatus.ERROR,
+        status_message='No fresh ESP32 telemetry',
+    ))
+
+    snapshot = WebBridgeNode.motor_fault_snapshot(bridge)
+    assert snapshot is not None
+    assert snapshot['telemetry_fresh'] is False
+
+
+def test_active_drive_stall_cancels_nav_before_guarded_recovery():
+    bridge = make_bridge()
+    bridge.blocked_start_recovery_lock = threading.Lock()
+    bridge.drive_stall_recovery_pending = True
+    active = {'command_id': 'TASK-STALL:pickup'}
+    calls = []
+    bridge.cancel_active_navigation_for_operation = lambda *, resume: (
+        calls.append(('cancel', resume)) or active
+    )
+    bridge.maybe_start_blocked_pose_recovery = (
+        lambda command, detail: calls.append(('recover', command, detail)) or True
+    )
+
+    bridge.run_active_drive_stall_recovery(active)
+
+    assert calls[0] == ('cancel', True)
+    assert calls[1][0] == 'recover'
+    assert bridge.drive_stall_recovery_pending is False
 
 
 def test_diagnostics_snapshot_marks_only_old_entry_stale():

@@ -1,7 +1,7 @@
 from concurrent.futures import Future
 from types import SimpleNamespace
 
-from amr_web_bridge.recovery_services import call_empty_service
+from amr_web_bridge.recovery_services import call_empty_service, call_service
 
 
 def client_for(future, available=True):
@@ -24,6 +24,23 @@ def test_unavailable_service_fails_closed():
     future = Future()
     assert not call_empty_service(client_for(future, False), object())[0]
     assert not future.cancelled()
+
+
+def test_discovery_timeout_is_forwarded_to_client():
+    future = Future()
+    future.set_result(object())
+    waits = []
+    client = client_for(future)
+    client.wait_for_service = lambda *, timeout_sec: waits.append(timeout_sec) or True
+
+    response, _detail = call_service(
+        client,
+        object(),
+        discovery_timeout_seconds=8.0,
+    )
+
+    assert response is not None
+    assert waits == [8.0]
 
 
 def test_timeout_removes_pending_request_and_does_not_retry():

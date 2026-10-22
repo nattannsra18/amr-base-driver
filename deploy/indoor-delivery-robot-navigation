@@ -27,6 +27,8 @@ source "$AMR_WORKSPACE/install/setup.bash"
 exec ros2 launch amr_base_driver navigation.launch.py \
   map_yaml:="$map_yaml" \
   enable_motors:="${AMR_ENABLE_MOTORS:-false}" \
+  start_base_hardware:=false \
+  use_composition:="${AMR_NAV2_USE_COMPOSITION:-false}" \
   activate_after_initial_pose:=true \
   start_localization:="$start_map_stack" \
   start_navigation:="$start_map_stack"

@@ -9,14 +9,16 @@ from pathlib import Path
 import shutil
 import time
 
+from action_msgs.msg import GoalStatus, GoalStatusArray
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from lifecycle_msgs.msg import TransitionEvent
-from nav_msgs.msg import Odometry
+from nav_msgs.msg import Odometry, Path as NavPath
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 
@@ -129,20 +131,55 @@ def diagnostic_level(value) -> int:
     return int(value)
 
 
-class BlackBoxRecorder(Node):
-    """Record the last minute of compact robot state without rosbag overhead."""
+def compact_path(message: NavPath, *, max_poses=64) -> list[dict[str, float]]:
+    """Keep a bounded, endpoint-preserving copy of a Nav2 global path."""
+    poses = message.poses
+    if not poses:
+        return []
+    limit = max(2, int(max_poses))
+    indexes = range(len(poses)) if len(poses) <= limit else (
+        round(index * (len(poses) - 1) / (limit - 1))
+        for index in range(limit)
+    )
+    return [
+        {
+            'x': round(float(poses[index].pose.position.x), 5),
+            'y': round(float(poses[index].pose.position.y), 5),
+            'qz': round(float(poses[index].pose.orientation.z), 6),
+            'qw': round(float(poses[index].pose.orientation.w), 6),
+        }
+        for index in indexes
+    ]
 
-    def __init__(self):
-        super().__init__('black_box_recorder')
+
+def aborted_goal_ids(message: GoalStatusArray) -> list[str]:
+    """Return terminal Nav2 aborts without tying capture to the web Agent."""
+    return [
+        bytes(status.goal_info.goal_id.uuid).hex()
+        for status in message.status_list
+        if int(status.status) == GoalStatus.STATUS_ABORTED
+    ]
+
+
+class BlackBoxRecorder(Node):
+    """Record five minutes of compact robot state without rosbag overhead."""
+
+    def __init__(self, *, parameter_overrides=None):
+        super().__init__(
+            'black_box_recorder', parameter_overrides=parameter_overrides)
         default_directory = os.environ.get(
             'AMR_BLACK_BOX_DIR',
             '~/.local/state/indoor-delivery-robot/black-box',
         )
         self.declare_parameter('directory', default_directory)
-        self.declare_parameter('retention_seconds', 60.0)
+        self.declare_parameter('retention_seconds', 300.0)
         self.declare_parameter('segment_seconds', 10.0)
         self.declare_parameter('max_topic_hz', 5.0)
+        self.declare_parameter('plan_max_poses', 64)
         self.declare_parameter('scan_topic', '/scan_recovery')
+        self.declare_parameter('record_scan', True)
+        self.declare_parameter('record_tf', True)
+        self.declare_parameter('record_extended_navigation', True)
         self.declare_parameter(
             'incident_directory',
             str(Path(default_directory).expanduser().parent / 'incidents'),
@@ -162,6 +199,7 @@ class BlackBoxRecorder(Node):
             1.0, float(self.get_parameter('max_topic_hz').value))
         self.last_recorded: dict[str, float] = {}
         self.previous_cpu_sample = None
+        self.archived_abort_goal_ids: set[str] = set()
 
         # Record only the command accepted by the owner arbiter. The current
         # owner and rejected/recovery state are already carried by diagnostics.
@@ -178,28 +216,47 @@ class BlackBoxRecorder(Node):
             lambda message: self.record_odometry('/odometry/filtered', message),
             qos_profile_sensor_data,
         )
+        record_extended_navigation = bool(
+            self.get_parameter('record_extended_navigation').value)
+        if record_extended_navigation:
+            self.create_subscription(
+                PoseWithCovarianceStamped, '/amcl_pose', self.record_amcl,
+                qos_profile_sensor_data)
+        # Raw scan and TF subscriptions are useful for deep perception
+        # captures, but deserializing every high-rate message costs roughly one
+        # ODROID core even when JSONL writes are throttled.  The production
+        # service disables these streams and retains their health/clearance
+        # summaries through /diagnostics; they remain opt-in for focused HIL.
+        if bool(self.get_parameter('record_scan').value):
+            self.create_subscription(
+                LaserScan, str(self.get_parameter('scan_topic').value),
+                self.record_scan, qos_profile_sensor_data)
+        if record_extended_navigation:
+            self.create_subscription(
+                NavPath, '/plan', self.record_plan, 10)
+            self.create_subscription(
+                GoalStatusArray, '/navigate_to_pose/_action/status',
+                self.record_navigation_status, 10)
         self.create_subscription(
-            PoseWithCovarianceStamped, '/amcl_pose', self.record_amcl,
-            qos_profile_sensor_data)
-        self.create_subscription(
-            LaserScan, str(self.get_parameter('scan_topic').value),
-            self.record_scan, qos_profile_sensor_data)
+            String, '/navigation_events', self.record_navigation_event, 10)
         self.create_subscription(
             DiagnosticArray, '/diagnostics', self.record_diagnostics, 10)
-        self.create_subscription(
-            TFMessage, '/tf', self.record_tf, qos_profile_sensor_data)
-        for node_name in (
-            'map_server', 'amcl', 'controller_server', 'planner_server',
-            'velocity_smoother', 'collision_monitor',
-            'behavior_server', 'bt_navigator',
-        ):
+        if bool(self.get_parameter('record_tf').value):
             self.create_subscription(
-                TransitionEvent,
-                f'/{node_name}/transition_event',
-                lambda message, name=node_name: self.record_lifecycle(
-                    name, message),
-                10,
-            )
+                TFMessage, '/tf', self.record_tf, qos_profile_sensor_data)
+        if record_extended_navigation:
+            for node_name in (
+                'map_server', 'amcl', 'controller_server', 'planner_server',
+                'velocity_smoother', 'collision_monitor',
+                'behavior_server', 'bt_navigator',
+            ):
+                self.create_subscription(
+                    TransitionEvent,
+                    f'/{node_name}/transition_event',
+                    lambda message, name=node_name: self.record_lifecycle(
+                        name, message),
+                    10,
+                )
         self.create_service(Trigger, '/black_box/mark', self.mark)
         self.diagnostics = self.create_publisher(
             DiagnosticArray, '/diagnostics', 10)
@@ -278,27 +335,82 @@ class BlackBoxRecorder(Node):
             'clearance': sector_clearances(message),
         })
 
+    def record_plan(self, message):
+        if not self.should_record('/plan'):
+            return
+        self.record('/plan', {
+            'age_ms': header_age_ms(self, message.header),
+            'frame_id': message.header.frame_id,
+            'pose_count': len(message.poses),
+            'poses': compact_path(
+                message,
+                max_poses=self.get_parameter('plan_max_poses').value,
+            ),
+        })
+
+    def record_navigation_status(self, message):
+        for goal_id in aborted_goal_ids(message):
+            if goal_id in self.archived_abort_goal_ids:
+                continue
+            if len(self.archived_abort_goal_ids) >= 512:
+                self.archived_abort_goal_ids.clear()
+            self.archived_abort_goal_ids.add(goal_id)
+            self.archive_incident('nav2-aborted', {
+                'event': 'nav2_aborted', 'goal_id': goal_id,
+            })
+
+    def record_navigation_event(self, message):
+        try:
+            event = json.loads(message.data)
+        except (TypeError, ValueError):
+            event = {'event': 'invalid_navigation_event', 'raw': message.data}
+        self.record('/navigation_events', event, force=True)
+        event_name = str(event.get('event', ''))
+        if event_name in {
+            'navigation_aborted', 'blocked_pose_recovery_started'
+        }:
+            self.archive_incident(event_name, event)
+        elif event_name == 'navigation_succeeded':
+            parts = (event_name, event.get('task_id'), event.get('stage'))
+            label = '-'.join(
+                ''.join(
+                    character if character.isalnum() or character in '-_'
+                    else '-'
+                    for character in str(part)
+                )
+                for part in parts
+                if part
+            )
+            self.archive_incident(label, event)
+
     def record_diagnostics(self, message):
         # /diagnostics has several independent publishers. Throttling all of
         # them with one key can retain serial health while silently dropping
         # command ownership (or the reverse).
         names = sorted(status.name for status in message.status)
         stream = '/diagnostics/' + '|'.join(names)
-        if not self.should_record(stream):
+        important = any(
+            diagnostic_level(status.level) >= diagnostic_level(
+                DiagnosticStatus.WARN)
+            for status in message.status
+        )
+        if not important and not self.should_record(stream):
             return
+
         statuses = []
         for status in message.status:
             values = {value.key: value.value for value in status.values}
+            level = diagnostic_level(status.level)
             statuses.append({
                 'name': status.name,
-                'level': diagnostic_level(status.level),
+                'level': level,
                 'message': status.message,
                 'values': values,
             })
         self.record(stream, {
             'age_ms': header_age_ms(self, message.header),
             'statuses': statuses,
-        })
+        }, force=important)
 
     def record_tf(self, message):
         if not self.should_record('/tf'):
@@ -373,9 +485,13 @@ class BlackBoxRecorder(Node):
         busy_delta = (total - previous[1]) - (idle - previous[0])
         return round(100.0 * busy_delta / (total - previous[1]), 2)
 
+    def archive_incident(self, label, marker):
+        self.record('marker', marker, force=True)
+        return self.writer.archive(self.incident_directory, label=label)
+
     def mark(self, _request, response):
-        self.record('marker', {'event': 'operator_mark'}, force=True)
-        archive = self.writer.archive(self.incident_directory)
+        archive = self.archive_incident(
+            'operator-mark', {'event': 'operator_mark'})
         response.success = True
         response.message = str(archive)
         return response

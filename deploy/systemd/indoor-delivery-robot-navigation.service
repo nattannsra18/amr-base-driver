@@ -1,8 +1,9 @@
 [Unit]
 Description=Indoor Delivery Robot Navigation Stack
 Documentation=https://github.com/nattannsra18/amr-base-driver
-After=network-online.target systemd-udev-settle.service
+After=network-online.target systemd-udev-settle.service indoor-delivery-robot-base.service
 Wants=network-online.target systemd-udev-settle.service
+Requires=indoor-delivery-robot-base.service
 Before=indoor-delivery-robot-agent.service
 StartLimitIntervalSec=120
 StartLimitBurst=5
@@ -21,6 +22,9 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 KillSignal=SIGINT
+Nice=-2
+CPUWeight=800
+AllowedCPUs=0-2
 
 [Install]
 WantedBy=multi-user.target

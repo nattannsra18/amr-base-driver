@@ -19,6 +19,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>ament_index_python</depend>
+  <depend>amr_base_driver</depend>
   <depend>action_msgs</depend>
   <depend>diagnostic_msgs</depend>
   <depend>geometry_msgs</depend>

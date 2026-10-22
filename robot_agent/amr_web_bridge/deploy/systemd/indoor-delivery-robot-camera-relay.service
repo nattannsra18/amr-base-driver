@@ -7,6 +7,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
+Slice=indoor-delivery-robot-background.slice
 User=indoor-robot
 Group=indoor-robot
 EnvironmentFile=/etc/indoor-delivery-robot/agent.env
@@ -23,7 +24,9 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 MemoryMax=128M
-Nice=0
+Nice=10
+CPUWeight=10
+AllowedCPUs=0-2
 
 [Install]
 WantedBy=multi-user.target

@@ -17,6 +17,9 @@ Restart=always
 RestartSec=3
 TimeoutStopSec=20
 KillSignal=SIGINT
+Nice=5
+CPUWeight=100
+AllowedCPUs=0-2
 
 # The Agent may elevate only the three exact commands allowlisted in its
 # dedicated sudoers file. All arbitrary sudo/systemctl commands remain denied.
@@ -24,7 +27,7 @@ NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/indoor-delivery-robot /home/odroid/amr_ws/maps
+ReadWritePaths=/var/lib/indoor-delivery-robot /home/odroid/amr_ws/maps /run/lock
 
 [Install]
 WantedBy=multi-user.target

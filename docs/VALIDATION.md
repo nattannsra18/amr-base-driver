@@ -101,10 +101,10 @@ On 2026-09-20:
   collision. Repeating in open space exposed an RPP acceleration deadlock:
   `/cmd_vel_nav` stayed at 0.04 rad/s because the controller applied its low
   angular acceleration limit against stationary measured odometry every cycle.
-- The RPP internal `max_angular_accel` is therefore 6.0 rad/s^2, while the
-  downstream open-loop velocity smoother remains the physical limiter at
-  0.40 rad/s^2. This changes one subsystem and preserves the gradual motor
-  command ramp.
+- The RPP internal `max_angular_accel` was initially raised to 6.0 rad/s^2 to
+  break that deadlock. It is now 2.5 rad/s^2 to reduce repeated heading
+  corrections, while the downstream open-loop velocity smoother remains the
+  physical limiter at 0.40 rad/s^2.
 
 ## 2026-09-25 black-box and controlled-motion follow-up
 

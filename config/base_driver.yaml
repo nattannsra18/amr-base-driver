@@ -11,10 +11,24 @@ amr_base_serial_bridge:
     # Corrects the stationary magnitude observed near 1.067 g.
     accel_scale: 0.9372
     max_rpm: 90.0
+    # Encoder trim is used only for near-straight motion. Curves keep the wheel
+    # ratio requested by Nav2 instead of applying independent RPM floors.
+    straight_trim_gain: 0.15
+    straight_trim_max_rpm: 3.0
     cmd_vel_timeout: 0.25
-    # Keep stall detection at the MCU's 100 Hz while publishing sensors at
-    # about 33 Hz, safely above the EKF's 20 Hz rate with lower DDS fan-out.
-    telemetry_publish_divisor: 3
+    # Temporary attended test mode: leave telemetry and MCU safety active.
+    stall_guard_enabled: false
+    # Stop both outputs when a trackable wheel command has no encoder motion.
+    # A stop or direction reversal releases the guard for scan-checked recovery.
+    stall_guard_min_target_rpm: 20.0
+    stall_guard_max_measured_rpm: 3.0
+    stall_guard_timeout_seconds: 1.2
+    # Nav2's bounded internal recovery can take about 15 seconds before the
+    # Agent receives the final abort. Keep the evidence long enough to hand off.
+    stall_guard_recent_seconds: 30.0
+    # The firmware emits telemetry every 50 ms (20 Hz). Publish every sample so
+    # odometry and IMU stay aligned with the EKF's configured 20 Hz update rate.
+    telemetry_publish_divisor: 1
     enable_motors: false
     odom_frame: odom
     base_frame: base_footprint

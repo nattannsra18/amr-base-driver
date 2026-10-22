@@ -9,14 +9,19 @@ from amr_web_bridge.web_bridge_node import WebBridgeNode
 from lifecycle_msgs.msg import State
 
 
-def client(response, calls, name):
+def client(response, calls, name, waits=None):
     def call(_request):
         calls.append(name)
         future = Future()
         future.set_result(response)
         return future
 
-    return SimpleNamespace(wait_for_service=lambda **_kwargs: True, call_async=call)
+    def wait_for_service(*, timeout_sec):
+        if waits is not None:
+            waits.append(timeout_sec)
+        return True
+
+    return SimpleNamespace(wait_for_service=wait_for_service, call_async=call)
 
 
 def test_native_lifecycle_requires_active_numeric_state():
@@ -91,6 +96,20 @@ def test_guarded_reverse_uses_warm_service_client():
     assert calls == ['reverse']
 
 
+def test_guarded_forward_uses_warm_service_client():
+    calls = []
+    response = SimpleNamespace(success=True, message='forward complete')
+    value = SimpleNamespace(
+        guarded_forward_client=client(response, calls, 'forward'),
+    )
+
+    ok, detail = WebBridgeNode.guarded_forward_for_recovery(value)
+
+    assert ok
+    assert detail == 'forward complete'
+    assert calls == ['forward']
+
+
 def test_guarded_arc_uses_direction_specific_warm_service_client():
     calls = []
     response = SimpleNamespace(success=True, message='arc complete')
@@ -106,6 +125,23 @@ def test_guarded_arc_uses_direction_specific_warm_service_client():
     assert ok
     assert detail == 'arc complete'
     assert calls == ['right']
+
+
+def test_guarded_forward_arc_uses_direction_specific_warm_service_client():
+    calls = []
+    response = SimpleNamespace(success=True, message='forward arc complete')
+    value = SimpleNamespace(
+        guarded_forward_arc_clients={
+            1: client(response, calls, 'left'),
+            -1: client(response, calls, 'right'),
+        },
+    )
+
+    ok, detail = WebBridgeNode.guarded_forward_arc_for_recovery(value, 0.22)
+
+    assert ok
+    assert detail == 'forward arc complete'
+    assert calls == ['left']
 
 
 def test_mapping_lifecycle_state_uses_generic_get_state_response():
@@ -124,6 +160,44 @@ def test_mapping_lifecycle_state_uses_generic_get_state_response():
         'planner_server',
     )
     assert calls == ['planner']
+
+
+def test_mapping_treats_not_yet_launched_navigation_as_inactive():
+    unavailable = SimpleNamespace(
+        wait_for_service=lambda *, timeout_sec: False,
+    )
+    value = SimpleNamespace(
+        mapping_lifecycle_clients={'planner_server': unavailable},
+        navigation_lifecycle_client=SimpleNamespace(
+            service_is_ready=lambda: False,
+        ),
+        navigation_client=SimpleNamespace(server_is_ready=lambda: False),
+    )
+
+    assert not WebBridgeNode.mapping_lifecycle_node_active(
+        value,
+        'planner_server',
+    )
+
+
+def test_mapping_fails_closed_when_navigation_manager_is_discovered():
+    unavailable = SimpleNamespace(
+        wait_for_service=lambda *, timeout_sec: False,
+    )
+    value = SimpleNamespace(
+        mapping_lifecycle_clients={'planner_server': unavailable},
+        navigation_lifecycle_client=SimpleNamespace(
+            service_is_ready=lambda: True,
+        ),
+        navigation_client=SimpleNamespace(server_is_ready=lambda: False),
+    )
+
+    try:
+        WebBridgeNode.mapping_lifecycle_node_active(value, 'planner_server')
+    except RuntimeError as error:
+        assert 'planner_server lifecycle state' in str(error)
+    else:
+        raise AssertionError('discovered navigation manager was ignored')
 
 
 def test_mapping_lifecycle_command_uses_manage_nodes_response():
@@ -161,6 +235,7 @@ def recovery_sequence_node(*, arc_results, extra_reverse=True):
     option_samples = iter([
         (arc(0.22, 'left'), arc(-0.22, 'right')),
         (arc(0.22, 'left'), arc(-0.22, 'right')),
+        (arc(0.22, 'left'), arc(-0.22, 'right')),
     ])
     results = iter(arc_results)
     node = SimpleNamespace(
@@ -169,7 +244,7 @@ def recovery_sequence_node(*, arc_results, extra_reverse=True):
         guarded_arc_for_recovery=lambda yaw: (
             arcs.append(yaw) or next(results)
         ),
-        stall_escape_decision=lambda: StallEscapeDecision(
+        stall_reverse_decision=lambda: StallEscapeDecision(
             action='back_up' if extra_reverse else 'none',
             value=0.10,
             clearance=0.8,
@@ -211,8 +286,30 @@ def test_alternative_escape_reverses_again_then_tries_other_arc():
     assert ok
     assert reverses == [0.10]
     assert arcs == [0.22, 0.22, -0.22]
-    assert 'additional guarded reverse' in detail
+    assert 'guarded reverse 1/2' in detail
     assert 'right arc complete' in detail
+
+
+def test_alternative_escape_requires_a_turn_and_can_reverse_twice_for_space():
+    node, arcs, reverses = recovery_sequence_node(
+        arc_results=[
+            (False, 'left blocked at start'),
+            (False, 'left blocked after first reverse'),
+            (False, 'right blocked after first reverse'),
+            (True, 'left arc complete after second reverse'),
+        ],
+    )
+
+    ok, detail = WebBridgeNode.run_alternative_escape_maneuvers(
+        node,
+        'cmd-two-reverses',
+    )
+
+    assert ok
+    assert reverses == [0.10, 0.10]
+    assert arcs == [0.22, 0.22, -0.22, 0.22]
+    assert 'guarded reverse 2/2' in detail
+    assert 'left arc complete after second reverse' in detail
 
 
 def test_alternative_escape_stops_when_safety_gate_changes():
@@ -254,6 +351,43 @@ def test_alternative_escape_does_not_replan_after_arc_leaves_pre_stall():
     assert arcs == [0.22]
     assert reverses == []
     assert 'PRE_STALL' in detail
+
+
+def test_alternative_escape_reports_failure_when_every_new_motion_is_refused():
+    node, arcs, reverses = recovery_sequence_node(
+        arc_results=[(False, 'swept footprint blocked')],
+        extra_reverse=False,
+    )
+
+    ok, detail = WebBridgeNode.run_alternative_escape_maneuvers(
+        node,
+        'cmd-all-blocked',
+        attempted_turn_values={-0.22},
+    )
+
+    assert not ok
+    assert arcs == [0.22]
+    assert reverses == []
+    assert 'swept footprint blocked' in detail
+
+
+def test_alternative_escape_accepts_verified_reverse_only_when_requested():
+    node, arcs, reverses = recovery_sequence_node(
+        arc_results=[(False, 'swept footprint blocked')],
+        extra_reverse=False,
+    )
+
+    ok, detail = WebBridgeNode.run_alternative_escape_maneuvers(
+        node,
+        'cmd-reversed-first',
+        attempted_turn_values={-0.22},
+        allow_reverse_only=True,
+    )
+
+    assert ok
+    assert arcs == [0.22]
+    assert reverses == []
+    assert 'verified-safe reverse pose' in detail
 
 
 def test_recovery_motion_wait_allows_temporary_amcl_staleness_to_settle():
@@ -321,9 +455,59 @@ def test_blocked_pose_recovery_turns_when_reverse_is_not_scan_safe():
     assert node.robot_operation_active is False
 
 
-def test_blocked_pose_recovery_gate_accepts_scan_safe_turn(monkeypatch):
+def test_blocked_pose_recovery_tries_alternative_after_arc_refusal():
+    queue = Queue()
+    alternative_calls = []
+    node = SimpleNamespace(
+        send_command_status=lambda *_args: None,
+        guarded_arc_for_recovery=lambda _yaw: (
+            False,
+            'swept footprint blocked',
+        ),
+        run_alternative_escape_maneuvers=lambda command_id, **kwargs: (
+            alternative_calls.append((command_id, kwargs))
+            or (True, 'right rolling arc completed')
+        ),
+        wait_for_recovery_lifecycle=lambda: (True, 'active'),
+        clear_recovery_costmaps=lambda: (True, 'cleared'),
+        compute_recovery_path=lambda _target: (True, 'path available'),
+        command_queue=queue,
+        get_logger=lambda: SimpleNamespace(
+            warning=lambda _message: None,
+            error=lambda _message: None,
+        ),
+        blocked_start_recovery_lock=threading.Lock(),
+        blocked_start_recovery_active=True,
+        robot_operation_lock=threading.Lock(),
+        robot_operation_active=True,
+    )
+    command = {
+        'command_id': 'command-arc-fallback',
+        'target': {'frame_id': 'map', 'x': 1.0, 'y': 2.0, 'yaw': 0.0},
+    }
+
+    WebBridgeNode.run_blocked_pose_recovery(
+        node,
+        command,
+        'Nav2 goal was aborted',
+        'arc',
+        0.22,
+        'rolling reverse left arc',
+    )
+
+    assert alternative_calls == [(
+        'command-arc-fallback',
+        {'attempted_turn_values': {0.22}},
+    )]
+    assert queue.get_nowait() == command
+    assert node.blocked_start_recovery_active is False
+    assert node.robot_operation_active is False
+
+
+def test_blocked_pose_recovery_gate_accepts_blocked_controller_error(monkeypatch):
     calls = []
     node = SimpleNamespace(
+        enable_blocked_pose_motion_recovery=True,
         motion_stop_latched=lambda: False,
         blocked_start_recovery_window_seconds=60.0,
         stall_escape_decision=lambda: StallEscapeDecision(
@@ -334,7 +518,9 @@ def test_blocked_pose_recovery_gate_accepts_scan_safe_turn(monkeypatch):
         ),
         motor_fault_snapshot=lambda: {
             'motors_enabled': True,
+            'telemetry_fresh': True,
             'mcu_fault': 0,
+            'drive_stall_recent': False,
         },
         localization_snapshot=lambda: {
             'health': 'LOCALIZED',
@@ -343,6 +529,7 @@ def test_blocked_pose_recovery_gate_accepts_scan_safe_turn(monkeypatch):
         },
         blocked_start_recovery_lock=threading.Lock(),
         blocked_start_recovery_active=False,
+        max_blocked_pose_recovery_attempts=2,
         blocked_start_recovery_attempted_ids=set(),
         robot_operation_lock=threading.Lock(),
         robot_operation_active=False,
@@ -369,6 +556,7 @@ def test_blocked_pose_recovery_gate_accepts_scan_safe_turn(monkeypatch):
         node,
         command,
         'Nav2 goal was aborted',
+        104,
     )
 
     assert started is True
@@ -379,6 +567,131 @@ def test_blocked_pose_recovery_gate_accepts_scan_safe_turn(monkeypatch):
         0.26,
         'left clearance 0.50 m; rear clearance 0.38 m',
     )
+
+
+def test_blocked_pose_recovery_allows_second_bounded_attempt(monkeypatch):
+    calls = []
+    node = SimpleNamespace(
+        enable_blocked_pose_motion_recovery=True,
+        max_blocked_pose_recovery_attempts=2,
+        motion_stop_latched=lambda: False,
+        blocked_start_recovery_window_seconds=60.0,
+        stall_escape_decision=lambda: StallEscapeDecision(
+            action='back_up', value=0.10, clearance=0.80, detail='rear clear'
+        ),
+        motor_fault_snapshot=lambda: {
+            'motors_enabled': True,
+            'telemetry_fresh': True,
+            'mcu_fault': 0,
+            'drive_stall_recent': True,
+        },
+        localization_snapshot=lambda: {
+            'health': 'LOCALIZED',
+            'amcl_state': 'ACTIVE',
+            'tf_available': True,
+        },
+        blocked_start_recovery_lock=threading.Lock(),
+        blocked_start_recovery_active=False,
+        blocked_start_recovery_attempted_ids={'command-two:0'},
+        robot_operation_lock=threading.Lock(),
+        robot_operation_active=False,
+        clear_active_command=lambda command_id: calls.append(('clear', command_id)),
+        run_blocked_pose_recovery=lambda *args: calls.append(('run', args)),
+        get_logger=lambda: SimpleNamespace(warning=lambda _message: None),
+    )
+
+    class ImmediateThread:
+        def __init__(self, *, target, args, **_kwargs):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+    monkeypatch.setattr(threading, 'Thread', ImmediateThread)
+    command = {
+        'command_id': 'command-two',
+        '_blocked_pose_recovery_attempt': 1,
+        '_navigation_started_monotonic': time.monotonic(),
+    }
+
+    assert WebBridgeNode.maybe_start_blocked_pose_recovery(
+        node, command, 'encoder stall', 0,
+    )
+    assert calls[0] == ('clear', 'command-two')
+    assert 'command-two:1' in node.blocked_start_recovery_attempted_ids
+
+
+def test_blocked_pose_recovery_refuses_attempt_beyond_bound():
+    warnings = []
+    node = SimpleNamespace(
+        enable_blocked_pose_motion_recovery=True,
+        max_blocked_pose_recovery_attempts=2,
+        get_logger=lambda: SimpleNamespace(warning=warnings.append),
+    )
+
+    assert not WebBridgeNode.maybe_start_blocked_pose_recovery(
+        node,
+        {
+            'command_id': 'command-exhausted',
+            '_blocked_pose_recovery_attempt': 2,
+        },
+        'encoder stall',
+        0,
+    )
+    assert 'limit reached (2/2 attempts)' in warnings[0]
+
+
+def test_blocked_pose_recovery_gate_refuses_automatic_motion_when_disabled():
+    warnings = []
+    node = SimpleNamespace(
+        enable_blocked_pose_motion_recovery=False,
+        get_logger=lambda: SimpleNamespace(
+            warning=lambda message: warnings.append(message)
+        ),
+    )
+
+    started = WebBridgeNode.maybe_start_blocked_pose_recovery(
+        node,
+        {'command_id': 'command-no-auto-motion'},
+        'Nav2 goal was aborted',
+    )
+
+    assert started is False
+    assert 'automatic motion recovery is disabled' in warnings[0]
+
+
+def test_blocked_pose_recovery_gate_requires_stall_or_blocked_controller_error():
+    warnings = []
+    node = SimpleNamespace(
+        enable_blocked_pose_motion_recovery=True,
+        motion_stop_latched=lambda: False,
+        blocked_start_recovery_window_seconds=60.0,
+        stall_escape_decision=lambda: StallEscapeDecision(
+            action='back_up', value=0.10, clearance=0.8, detail='rear clear'
+        ),
+        motor_fault_snapshot=lambda: {
+            'motors_enabled': True,
+            'telemetry_fresh': True,
+            'mcu_fault': 0,
+            'drive_stall_recent': False,
+        },
+        get_logger=lambda: SimpleNamespace(warning=warnings.append),
+    )
+
+    started = WebBridgeNode.maybe_start_blocked_pose_recovery(
+        node,
+        {
+            'command_id': 'command-no-encoder-stall',
+            '_navigation_started_monotonic': time.monotonic(),
+        },
+        'Nav2 goal was aborted',
+        102,
+    )
+
+    assert started is False
+    assert 'neither a recent command-vs-encoder stall' in warnings[0]
+    assert 'error_code=102' in warnings[0]
 
 
 def test_recovery_motion_wait_does_not_delay_a_motor_fault():

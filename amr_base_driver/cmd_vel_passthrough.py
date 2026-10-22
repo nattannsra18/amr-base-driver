@@ -80,8 +80,10 @@ class CmdVelPassthrough(Node):
         self.create_subscription(
             Twist, '/cmd_vel_stop',
             lambda command: self.command(CommandOwner.STOPPED, command), 10)
-        self.watchdog = self.create_timer(0.05, self.expire_owner)
-        self.diagnostic_timer = self.create_timer(0.5, self.publish_diagnostic)
+        # A 10 Hz watchdog still expires the 0.25 s lease within the advertised
+        # 0.35 s dead-man bound, without waking Python 20 times per second.
+        self.watchdog = self.create_timer(0.1, self.expire_owner)
+        self.diagnostic_timer = self.create_timer(1.0, self.publish_diagnostic)
         self.get_logger().info(
             'Command ownership ready: NAVIGATION, RECOVERY, MANUAL -> '
             '/cmd_vel_safe')

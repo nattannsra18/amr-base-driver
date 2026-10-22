@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from action_msgs.msg import GoalStatus
+from amr_base_driver.black_box_recorder import BlackBoxRecorder
 from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
@@ -25,7 +26,9 @@ from nav2_msgs.srv import ClearEntireCostmap, LoadMap, ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -34,7 +37,7 @@ from rclpy.qos import (
 )
 from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, LaserScan
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, String
 from std_srvs.srv import Empty as EmptyService, Trigger
 from tf2_ros import Buffer, TransformListener
 import websockets
@@ -76,7 +79,35 @@ from .stall_escape import (
 )
 
 
+NAV2_FOLLOW_PATH_ERROR_DETAILS = {
+    100: 'Nav2 controller reported an unknown error',
+    101: 'Nav2 rejected the configured controller',
+    102: 'Nav2 could not transform the path into the controller frame',
+    103: 'Nav2 received an invalid path',
+    104: (
+        'Nav2 controller patience exceeded; no safe control command '
+        'was available in time'
+    ),
+    105: 'Nav2 could not make progress along the path',
+    106: 'Nav2 could not produce a valid control command',
+    107: 'Nav2 controller timed out',
+}
+
+
+def navigation_abort_detail(error_code: int, error_message: str) -> str:
+    """Return an operator-facing explanation for a FollowPath abort."""
+    message = str(error_message or '').strip()
+    if message and message != 'Nav2 goal was aborted':
+        return message
+    return NAV2_FOLLOW_PATH_ERROR_DETAILS.get(
+        int(error_code),
+        'Nav2 goal was aborted',
+    )
+
+
 class WebBridgeNode(Node):
+
+    BLOCKED_CONTROLLER_ERROR_CODES = frozenset({104, 105, 106})
 
     def __init__(self) -> None:
         super().__init__('amr_web_bridge')
@@ -151,8 +182,12 @@ class WebBridgeNode(Node):
         )
         self.declare_parameter('localization_scan_angular_speed', 0.26)
         self.declare_parameter('localization_scan_timeout_seconds', 28.0)
+        self.declare_parameter('enable_blocked_pose_motion_recovery', False)
         self.declare_parameter('blocked_start_recovery_window_seconds', 90.0)
-        self.declare_parameter('near_goal_acceptance_distance_m', 0.35)
+        self.declare_parameter('max_blocked_pose_recovery_attempts', 2)
+        self.declare_parameter('near_goal_acceptance_distance_m', 0.20)
+        self.declare_parameter('near_goal_acceptance_yaw_radians', 0.20)
+        self.declare_parameter('near_goal_acceptance_requires_heading', False)
 
         self.server_url = str(
             self.get_parameter('server_url').value
@@ -373,6 +408,9 @@ class WebBridgeNode(Node):
             60.0,
             max(10.0, float(self.get_parameter('localization_scan_timeout_seconds').value)),
         )
+        self.enable_blocked_pose_motion_recovery = bool(
+            self.get_parameter('enable_blocked_pose_motion_recovery').value
+        )
         self.blocked_start_recovery_window_seconds = min(
             120.0,
             max(
@@ -382,14 +420,35 @@ class WebBridgeNode(Node):
                 ).value),
             ),
         )
-        self.near_goal_acceptance_distance_m = min(
-            0.5,
+        self.max_blocked_pose_recovery_attempts = min(
+            3,
             max(
-                0.15,
+                1,
+                int(self.get_parameter(
+                    'max_blocked_pose_recovery_attempts'
+                ).value),
+            ),
+        )
+        self.near_goal_acceptance_distance_m = min(
+            0.30,
+            max(
+                0.08,
                 float(self.get_parameter(
                     'near_goal_acceptance_distance_m'
                 ).value),
             ),
+        )
+        self.near_goal_acceptance_yaw_radians = min(
+            0.35,
+            max(
+                0.15,
+                float(self.get_parameter(
+                    'near_goal_acceptance_yaw_radians'
+                ).value),
+            ),
+        )
+        self.near_goal_acceptance_requires_heading = bool(
+            self.get_parameter('near_goal_acceptance_requires_heading').value
         )
         self.websocket_uri = (
             f'{self.server_url}/ws/robots/{self.robot_id}'
@@ -464,6 +523,12 @@ class WebBridgeNode(Node):
         self.robot_operation_active = False
         self.blocked_start_recovery_lock = threading.Lock()
         self.blocked_start_recovery_active = False
+        self.drive_stall_recovery_pending = False
+        # A drive_blocked diagnostic can be followed immediately by an OK
+        # diagnostic when Nav2 commands zero velocity.  Keep the event until
+        # the 10 Hz worker consumes it so a real encoder stall cannot vanish
+        # between worker ticks.
+        self.drive_stall_event_pending = False
         self.blocked_start_recovery_attempted_ids: set[str] = set()
         self.navigation_recovery_runner = NavigationRecoveryRunner()
         self.last_feedback_log_ns = 0
@@ -486,6 +551,7 @@ class WebBridgeNode(Node):
             slam_params_file=mapping_params_file,
             lifecycle_state=self.mapping_lifecycle_node_active,
             lifecycle_command=self.mapping_lifecycle_command,
+            clear_stale_marker=True,
         )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -662,9 +728,17 @@ class WebBridgeNode(Node):
             Trigger,
             '/guarded_reverse_escape',
         )
+        self.guarded_forward_client = self.create_client(
+            Trigger,
+            '/guarded_forward_escape',
+        )
         self.guarded_arc_clients = {
             1: self.create_client(Trigger, '/guarded_arc_escape_left'),
             -1: self.create_client(Trigger, '/guarded_arc_escape_right'),
+        }
+        self.guarded_forward_arc_clients = {
+            1: self.create_client(Trigger, '/guarded_forward_arc_escape_left'),
+            -1: self.create_client(Trigger, '/guarded_forward_arc_escape_right'),
         }
         # Set only after every runtime recovery endpoint has a persistent ROS
         # client.  Lightweight unit fixtures created with ``object.__new__``
@@ -686,13 +760,18 @@ class WebBridgeNode(Node):
             self.initial_pose_topic,
             10,
         )
+        self.navigation_event_publisher = self.create_publisher(
+            String,
+            '/navigation_events',
+            10,
+        )
         self.navigation_speed_limit_publisher = self.create_publisher(
             SpeedLimit,
             '/speed_limit',
             10,
         )
         self.periodic_intervals = {
-            'work': 0.1,
+            'work': 0.2,
             'amcl': 1.0,
             'emergency_zero': 1.0 / self.emergency_stop_zero_rate,
             'physical_estop': 0.2,
@@ -766,6 +845,7 @@ class WebBridgeNode(Node):
         if due('mapping_deadman'):
             self.enforce_mapping_deadman()
         if due('work'):
+            self.maybe_recover_active_drive_stall()
             self.process_command_queue()
             self.process_preview_queue()
             self.process_map_command_queue()
@@ -1313,6 +1393,15 @@ class WebBridgeNode(Node):
         message: DiagnosticArray,
     ) -> None:
         received_at = time.monotonic()
+        drive_stall_reported = any(
+            status.name in {'Base drive telemetry', 'Host wheel feedback'}
+            and any(
+                value.key == 'drive_blocked'
+                and value.value.lower() == 'true'
+                for value in status.values
+            )
+            for status in message.status
+        )
         diagnostics = {
             'type': 'diagnostics',
             'timestamp': self.diagnostic_timestamp(message),
@@ -1359,6 +1448,11 @@ class WebBridgeNode(Node):
             self.latest_diagnostics = diagnostics
             self.diagnostics_revision += 1
             self.last_diagnostics_monotonic = received_at
+        if drive_stall_reported and hasattr(
+            self, 'blocked_start_recovery_lock'
+        ):
+            with self.blocked_start_recovery_lock:
+                self.drive_stall_event_pending = True
 
     def diagnostics_snapshot(
         self,
@@ -1844,7 +1938,7 @@ class WebBridgeNode(Node):
                 websocket,
                 self.agent_readiness_snapshot(),
             )
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(3.0)
 
     async def heartbeat_loop(self, websocket: Any) -> None:
         while not self.stop_requested.is_set():
@@ -1986,7 +2080,9 @@ class WebBridgeNode(Node):
             if signature != sent_signature:
                 await self.send_json(websocket, status)
                 sent_signature = signature
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(
+                0.25 if status.get('phase') == 'MAPPING' else 1.0
+            )
 
     async def send_mapping_status(
         self,
@@ -2007,7 +2103,7 @@ class WebBridgeNode(Node):
     async def localization_status_loop(self, websocket: Any) -> None:
         while not self.stop_requested.is_set():
             await self.send_localization_status(websocket)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
 
     async def send_localization_status(
         self,
@@ -2298,6 +2394,13 @@ class WebBridgeNode(Node):
                     or self.active_localization_command is not None
                 ):
                     raise ValueError('Navigation, route preview, or map switching is active')
+                with self.scan_lock:
+                    last_scan = self.last_scan_monotonic
+                if last_scan is None or time.monotonic() - last_scan > 1.0:
+                    raise ValueError(
+                        'Fresh LiDAR scan is unavailable; wait for the '
+                        'LiDAR driver to recover, then start mapping again'
+                    )
                 self.capture_mapping_pose_reference()
                 await asyncio.to_thread(
                     self.mapping_runtime.start,
@@ -2360,7 +2463,7 @@ class WebBridgeNode(Node):
             and not isinstance(angular_z, bool)
             and math.isfinite(float(linear_x))
             and math.isfinite(float(angular_z))
-            and abs(float(linear_x)) <= 0.22
+            and abs(float(linear_x)) <= 0.30
             and abs(float(angular_z)) <= 1.0
         )
         if not valid:
@@ -3237,19 +3340,31 @@ class WebBridgeNode(Node):
                 return None
             statuses = list(diagnostics.get('statuses', []))
         values: dict[str, str] = {}
-        found = False
+        motor_status_found = False
+        telemetry_fresh: bool | None = None
+        now = time.monotonic()
         for status in statuses:
+            if status.get('name') == 'Base serial telemetry':
+                received_at = float(status.get('_received_at', now))
+                telemetry_fresh = bool(
+                    now - received_at <= self.diagnostics_stale_after_seconds
+                    and status.get('level') == 'OK'
+                    and status.get('message') == 'Fresh telemetry'
+                )
+                continue
             if status.get('name') not in {
                 'ESP32 base controller',
                 'ESP32 MCU fault',
+                'Base drive telemetry',
+                'Host wheel feedback',
             }:
                 continue
-            found = True
+            motor_status_found = True
             values.update({
                 str(item.get('key')): str(item.get('value', ''))
                 for item in status.get('values', [])
             })
-        if not found:
+        if not motor_status_found:
             return None
         try:
             mcu_fault = int(values.get('mcu_fault', '-1'))
@@ -3258,7 +3373,107 @@ class WebBridgeNode(Node):
         return {
             'mcu_fault': mcu_fault,
             'motors_enabled': values.get('motors_enabled', '').lower() == 'true',
+            'telemetry_fresh': telemetry_fresh,
+            'drive_blocked': values.get('drive_blocked', '').lower() == 'true',
+            'drive_stall_recent': (
+                values.get('drive_stall_recent', '').lower() == 'true'
+            ),
         }
+
+    def navigation_readiness_rejection(self) -> str | None:
+        """Explain why a new Nav2 goal cannot safely start yet."""
+        localization = self.localization_snapshot()
+        if (
+            localization.get('health') != 'LOCALIZED'
+            or localization.get('amcl_state') != 'ACTIVE'
+            or not localization.get('tf_available')
+        ):
+            detail = str(
+                localization.get('detail')
+                or localization.get('reason')
+                or 'AMCL is not localized'
+            )
+            if localization.get('reason') == 'NO_POSE':
+                return f'Initial Pose is required before navigation: {detail}'
+            return f'Localization is not ready for navigation: {detail}'
+
+        fault = self.motor_fault_snapshot()
+        if fault is None:
+            return (
+                'Fresh ESP32 motor diagnostics are required before navigation'
+            )
+        if fault.get('telemetry_fresh') is False:
+            return 'ESP32 telemetry is not fresh; navigation was not started'
+        if not fault.get('motors_enabled'):
+            return 'Motors are disabled; arm the base before navigation'
+        if int(fault.get('mcu_fault', -1)) != 0:
+            return (
+                'ESP32 motor fault must be cleared before navigation '
+                f'(mcu_fault={fault.get("mcu_fault")})'
+            )
+        if fault.get('drive_blocked'):
+            return (
+                'Encoder stall guard is holding motor output at zero; '
+                'stop or reverse the base before starting navigation'
+            )
+        return None
+
+    def maybe_recover_active_drive_stall(self) -> None:
+        """Cancel a stalled Nav2 goal and hand it to guarded recovery."""
+        fault = self.motor_fault_snapshot()
+        with self.blocked_start_recovery_lock:
+            stall_event_pending = bool(
+                getattr(self, 'drive_stall_event_pending', False)
+            )
+        if fault is None or not (
+            fault.get('drive_blocked') or stall_event_pending
+        ):
+            return
+        with self.command_lock:
+            command = dict(self.active_command) if self.active_command else None
+        if command is None:
+            with self.blocked_start_recovery_lock:
+                self.drive_stall_event_pending = False
+            return
+        command_id = str(command.get('command_id', ''))
+        attempt_index = max(
+            0, int(command.get('_blocked_pose_recovery_attempt', 0))
+        )
+        attempt_token = f'{command_id}:{attempt_index}'
+        max_attempts = max(
+            1, int(getattr(self, 'max_blocked_pose_recovery_attempts', 2))
+        )
+        with self.blocked_start_recovery_lock:
+            if (
+                self.drive_stall_recovery_pending
+                or self.blocked_start_recovery_active
+                or attempt_index >= max_attempts
+                or attempt_token in self.blocked_start_recovery_attempted_ids
+            ):
+                self.drive_stall_event_pending = False
+                return
+            self.drive_stall_event_pending = False
+            self.drive_stall_recovery_pending = True
+        threading.Thread(
+            target=self.run_active_drive_stall_recovery,
+            args=(command,),
+            name=f'drive-stall-recovery-{command_id}',
+            daemon=True,
+        ).start()
+
+    def run_active_drive_stall_recovery(self, command: dict[str, Any]) -> None:
+        """Stop the current controller before issuing an escape maneuver."""
+        try:
+            active = self.cancel_active_navigation_for_operation(resume=True)
+            if active is None:
+                return
+            self.maybe_start_blocked_pose_recovery(
+                active,
+                'Encoder stall guard stopped motor output during navigation',
+            )
+        finally:
+            with self.blocked_start_recovery_lock:
+                self.drive_stall_recovery_pending = False
 
     def stall_escape_decision(
         self,
@@ -3316,6 +3531,28 @@ class WebBridgeNode(Node):
             angle_increment=float(scan['angle_increment']),
             range_min=float(scan['range_min']),
             range_max=float(scan['range_max']),
+        )
+
+    def stall_reverse_decision(self) -> StallEscapeDecision:
+        """Return a straight reverse only when the fresh rear sector is clear."""
+        now = time.monotonic()
+        with self.scan_lock:
+            scan = self.latest_scan
+            last_scan = self.last_scan_monotonic
+        if scan is None or last_scan is None or now - last_scan > 1.0:
+            return StallEscapeDecision(
+                action='none',
+                detail='fresh LaserScan is unavailable',
+            )
+        scan = self.scan_geometry(scan)
+        return choose_stall_escape(
+            scan['ranges'],
+            angle_min=float(scan['angle_min']),
+            angle_increment=float(scan['angle_increment']),
+            range_min=float(scan['range_min']),
+            range_max=float(scan['range_max']),
+            forward_required=math.inf,
+            side_required=math.inf,
         )
 
     @staticmethod
@@ -3386,8 +3623,20 @@ class WebBridgeNode(Node):
             client,
             GetState.Request(),
             timeout_seconds=4.0,
+            discovery_timeout_seconds=8.0,
         )
         if response is None:
+            if (
+                str(node).removeprefix('/') == 'planner_server'
+                and detail == 'service is unavailable'
+                and not self.navigation_lifecycle_client.service_is_ready()
+                and not self.navigation_client.server_is_ready()
+            ):
+                # The readiness-driven launch intentionally delays Nav2 until
+                # localization is ready. Mapping is safe to start while the
+                # entire navigation process group is genuinely absent; the
+                # mapping-active marker prevents it from racing us afterward.
+                return False
             raise RuntimeError(f'Unable to read {node} lifecycle state: {detail}')
         return int(response.current_state.id) == 3
 
@@ -3403,6 +3652,7 @@ class WebBridgeNode(Node):
             client,
             request,
             timeout_seconds=15.0,
+            discovery_timeout_seconds=8.0,
         )
         if response is None:
             raise RuntimeError(f'{manager} transition failed: {detail}')
@@ -3447,6 +3697,19 @@ class WebBridgeNode(Node):
             timeout_seconds=6.0,
         )
 
+    def guarded_forward_for_recovery(self) -> tuple[bool, str]:
+        """Run the independent scan-guarded forward escape."""
+        client = getattr(self, 'guarded_forward_client', None)
+        if client is None:
+            if not getattr(self, 'persistent_recovery_clients_ready', False):
+                return self.navigation_recovery_runner.guarded_forward()
+            return False, 'guarded forward service client is unavailable'
+        return WebBridgeNode._service_response(
+            client,
+            Trigger.Request(),
+            timeout_seconds=6.0,
+        )
+
     def guarded_arc_for_recovery(self, yaw: float) -> tuple[bool, str]:
         """Run a scan/odometry-guarded rolling arc outside Nav2 planning."""
         direction = 1 if float(yaw) > 0.0 else -1
@@ -3462,6 +3725,21 @@ class WebBridgeNode(Node):
             timeout_seconds=6.0,
         )
 
+    def guarded_forward_arc_for_recovery(self, yaw: float) -> tuple[bool, str]:
+        """Run a scan/odometry-guarded rolling forward arc."""
+        direction = 1 if float(yaw) > 0.0 else -1
+        clients = getattr(self, 'guarded_forward_arc_clients', {})
+        client = clients.get(direction)
+        if client is None:
+            if not getattr(self, 'persistent_recovery_clients_ready', False):
+                return self.navigation_recovery_runner.guarded_forward_arc(yaw)
+            return False, 'guarded forward arc service client is unavailable'
+        return WebBridgeNode._service_response(
+            client,
+            Trigger.Request(),
+            timeout_seconds=6.0,
+        )
+
     def recovery_motion_is_safe(self) -> tuple[bool, str]:
         """Revalidate hard safety gates before each additional maneuver."""
         if self.motion_stop_latched():
@@ -3469,6 +3747,8 @@ class WebBridgeNode(Node):
         fault = self.motor_fault_snapshot()
         if fault is None or not fault.get('motors_enabled'):
             return False, 'ESP32 diagnostics are unavailable or motors are disabled'
+        if fault.get('telemetry_fresh') is False:
+            return False, 'ESP32 telemetry is not fresh'
         if int(fault.get('mcu_fault', -1)) != 0:
             return False, 'motor diagnostics are not normal'
         localization = self.localization_snapshot()
@@ -3507,6 +3787,7 @@ class WebBridgeNode(Node):
         command_id: str,
         *,
         attempted_turn_values: set[float] | None = None,
+        allow_reverse_only: bool = False,
     ) -> tuple[bool, str]:
         """Try a bounded reverse-arc sequence before replanning once."""
         attempts: list[str] = []
@@ -3530,47 +3811,45 @@ class WebBridgeNode(Node):
             if turned:
                 return True, '; '.join(attempts)
 
-        # A footprint-safe spin can still be impossible while a chassis corner
-        # is close to furniture. Move the center of rotation another 0.10 m
-        # rearward, but only when a fresh scan independently authorizes it.
-        reverse = self.stall_escape_decision()
-        reversed_again = False
-        if reverse.action == 'back_up':
+        # Move the center of rotation rearward in at most two independently
+        # guarded 0.10 m steps.  Do not requeue Nav2 until a heading-changing
+        # arc completes, otherwise the controller can drive into the same
+        # obstacle again from a merely translated pose.
+        for reverse_step in range(2):
+            reverse = self.stall_reverse_decision()
+            if reverse.action != 'back_up':
+                break
             safe, safety_detail = self.wait_for_recovery_motion_safe()
             if not safe:
                 return False, safety_detail
             reversed_again, output = self.guarded_reverse_for_recovery()
             attempts.append(
-                f'additional guarded reverse ({reverse.detail}): '
+                f'guarded reverse {reverse_step + 1}/2 ({reverse.detail}): '
                 f'{output or "no response"}'
             )
-            if reversed_again:
-                lifecycle_ok, lifecycle_detail = self.wait_for_recovery_lifecycle()
-                if not lifecycle_ok:
-                    return False, lifecycle_detail
-                # The center of rotation moved, so a direction rejected at
-                # the old pose is a genuinely new collision-checked attempt.
-                tried_values.clear()
+            if not reversed_again:
+                break
+            lifecycle_ok, lifecycle_detail = self.wait_for_recovery_lifecycle()
+            if not lifecycle_ok:
+                return False, lifecycle_detail
+            tried_values.clear()
 
-        # Re-read LaserScan after the center of rotation changes. Try the
-        # clearest rolling direction, then the other scan-safe direction.
-        fresh_options = self.stall_arc_decisions()
-        for option in fresh_options[:2]:
-            value = float(option.value)
-            if value in tried_values:
-                continue
-            tried_values.add(value)
-            safe, safety_detail = self.wait_for_recovery_motion_safe()
-            if not safe:
-                return False, safety_detail
-            turned, output = self.guarded_arc_for_recovery(value)
-            direction = 'left' if value > 0.0 else 'right'
-            attempts.append(
-                f'{direction} rolling arc ({option.detail}): '
-                f'{output or "no response"}'
-            )
-            if turned:
-                return True, '; '.join(attempts)
+            # Re-read LaserScan after every translation. Try both scan-safe
+            # directions before considering one more reverse step.
+            for option in self.stall_arc_decisions()[:2]:
+                value = float(option.value)
+                tried_values.add(value)
+                safe, safety_detail = self.wait_for_recovery_motion_safe()
+                if not safe:
+                    return False, safety_detail
+                turned, output = self.guarded_arc_for_recovery(value)
+                direction = 'left' if value > 0.0 else 'right'
+                attempts.append(
+                    f'{direction} rolling arc ({option.detail}): '
+                    f'{output or "no response"}'
+                )
+                if turned:
+                    return True, '; '.join(attempts)
 
         if not attempts:
             attempts.append('no fresh scan-safe turn or additional reverse was available')
@@ -3578,21 +3857,19 @@ class WebBridgeNode(Node):
             f'Alternative escape maneuvers for {command_id} ended without a '
             f'completed turn: {"; ".join(attempts)}'
         )
-        # The first guarded reverse may have changed the pose enough to plan a
-        # route, but only continue if the last failed maneuver did not leave
-        # the base in PRE_STALL/FAULTED. Previously this returned success
-        # unconditionally and could requeue a Nav2 goal while motion was
-        # inhibited by the base driver.
         safe, safety_detail = self.wait_for_recovery_motion_safe()
         if not safe:
             return False, (
                 f'{"; ".join(attempts)}; recovery stopped because '
                 f'{safety_detail}'
             )
-        attempts.append(
-            'no turn completed; continuing from the verified-safe reverse pose'
-        )
-        return True, '; '.join(attempts)
+        if allow_reverse_only:
+            attempts.append(
+                'no turn completed; continuing from the verified-safe reverse pose'
+            )
+            return True, '; '.join(attempts)
+        attempts.append('no heading-changing escape completed; retry is unsafe')
+        return False, '; '.join(attempts)
 
     def spin_for_recovery(
         self,
@@ -3726,9 +4003,17 @@ class WebBridgeNode(Node):
         self,
         command: dict[str, Any],
         original_detail: str,
+        error_code: int = 0,
     ) -> bool:
         """Try one scan-guarded reverse or rolling arc after an early abort."""
         command_id = str(command.get('command_id', 'unknown'))
+        attempt_index = max(
+            0, int(command.get('_blocked_pose_recovery_attempt', 0))
+        )
+        max_attempts = max(
+            1, int(getattr(self, 'max_blocked_pose_recovery_attempts', 2))
+        )
+        attempt_token = f'{command_id}:{attempt_index}'
 
         def refuse(reason: str) -> bool:
             self.get_logger().warning(
@@ -3736,6 +4021,15 @@ class WebBridgeNode(Node):
             )
             return False
 
+        if not self.enable_blocked_pose_motion_recovery:
+            return refuse(
+                'automatic motion recovery is disabled; operator review is required'
+            )
+        if attempt_index >= max_attempts:
+            return refuse(
+                'bounded automatic recovery limit reached '
+                f'({attempt_index}/{max_attempts} attempts)'
+            )
         if self.motion_stop_latched():
             return refuse('an emergency stop is latched')
         started = float(command.get('_navigation_started_monotonic', 0.0))
@@ -3747,15 +4041,27 @@ class WebBridgeNode(Node):
                 f'{self.blocked_start_recovery_window_seconds:.1f}s window'
             )
         escape = self.stall_escape_decision()
-        if escape.action not in {'back_up', 'arc', 'spin'}:
+        if escape.action not in {
+            'back_up', 'forward', 'arc', 'forward_arc', 'spin'
+        }:
             return refuse(f'LaserScan found no safe escape: {escape.detail}')
         fault = self.motor_fault_snapshot()
         if fault is None or not fault.get('motors_enabled'):
             return refuse('ESP32 diagnostics are unavailable or motors are disabled')
+        if fault.get('telemetry_fresh') is False:
+            return refuse('ESP32 telemetry is not fresh')
         if int(fault.get('mcu_fault', -1)) != 0:
             return refuse(
                 'motor diagnostics are not normal '
                 f'(mcu_fault={fault.get("mcu_fault")})'
+            )
+        controller_reports_blocked = (
+            int(error_code) in WebBridgeNode.BLOCKED_CONTROLLER_ERROR_CODES
+        )
+        if not fault.get('drive_stall_recent') and not controller_reports_blocked:
+            return refuse(
+                'neither a recent command-vs-encoder stall nor a blocked '
+                f'controller error was reported (error_code={int(error_code)})'
             )
         localization = self.localization_snapshot()
         if (
@@ -3774,9 +4080,11 @@ class WebBridgeNode(Node):
         with self.blocked_start_recovery_lock:
             if (
                 self.blocked_start_recovery_active
-                or command_id in self.blocked_start_recovery_attempted_ids
+                or attempt_token in self.blocked_start_recovery_attempted_ids
             ):
-                return refuse('this command was already attempted or recovery is busy')
+                return refuse(
+                    'this recovery attempt was already started or recovery is busy'
+                )
             with self.robot_operation_lock:
                 if self.robot_operation_active:
                     return refuse('another robot operation is active')
@@ -3784,9 +4092,16 @@ class WebBridgeNode(Node):
             if len(self.blocked_start_recovery_attempted_ids) >= 512:
                 self.blocked_start_recovery_attempted_ids.clear()
             self.blocked_start_recovery_active = True
-            self.blocked_start_recovery_attempted_ids.add(command_id)
+            self.blocked_start_recovery_attempted_ids.add(attempt_token)
 
         self.clear_active_command(command_id)
+        WebBridgeNode.publish_navigation_event(
+            self,
+            command,
+            'blocked_pose_recovery_started',
+            original_detail,
+            error_code=error_code,
+        )
         threading.Thread(
             target=self.run_blocked_pose_recovery,
             args=(
@@ -3800,6 +4115,36 @@ class WebBridgeNode(Node):
             daemon=True,
         ).start()
         return True
+
+    def publish_navigation_event(
+        self,
+        command: dict[str, Any],
+        event: str,
+        detail: str,
+        *,
+        error_code: int = 0,
+        goal_status: int | None = None,
+    ) -> None:
+        """Publish compact, immediate evidence for the rolling black box."""
+        publisher = getattr(self, 'navigation_event_publisher', None)
+        if publisher is None:
+            return
+        localization = self.localization_snapshot()
+        payload = {
+            'event': event,
+            'command_id': command.get('command_id'),
+            'task_id': command.get('task_id'),
+            'stage': command.get('stage'),
+            'error_code': int(error_code),
+            'goal_status': goal_status,
+            'detail': detail,
+            'target': command.get('target'),
+            'pose': localization.get('pose'),
+            'timestamp': self.utc_timestamp(),
+        }
+        message = String()
+        message.data = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+        publisher.publish(message)
 
     def accept_aborted_goal_when_near(
         self,
@@ -3841,23 +4186,39 @@ class WebBridgeNode(Node):
             return False, 'motor diagnostics are not normal'
 
         try:
+            target_yaw = float(target['yaw'])
             distance = math.hypot(
                 float(pose['x']) - target_x,
                 float(pose['y']) - target_y,
             )
+            pose_yaw = float(pose['yaw'])
         except (KeyError, TypeError, ValueError):
             return False, 'the localized robot position is invalid'
-        if not math.isfinite(distance):
+        if not all(math.isfinite(value) for value in (distance, target_yaw, pose_yaw)):
             return False, 'the localized robot position is invalid'
         if distance > self.near_goal_acceptance_distance_m:
             return False, (
                 f'robot is {distance:.2f} m from the goal, outside the '
                 f'{self.near_goal_acceptance_distance_m:.2f} m acceptance radius'
             )
+        yaw_error = abs(math.atan2(
+            math.sin(pose_yaw - target_yaw),
+            math.cos(pose_yaw - target_yaw),
+        ))
+        if (
+            self.near_goal_acceptance_requires_heading
+            and yaw_error > self.near_goal_acceptance_yaw_radians
+        ):
+            return False, (
+                f'robot heading is {yaw_error:.2f} rad from the goal, outside '
+                f'the {self.near_goal_acceptance_yaw_radians:.2f} rad '
+                'acceptance tolerance'
+            )
 
         return True, (
-            f'Accepted arrival {distance:.2f} m from the goal after Nav2 was '
-            'blocked near the destination'
+            f'Accepted arrival inside the {self.near_goal_acceptance_distance_m:.2f} m '
+            f'goal area ({distance:.2f} m from center, heading error '
+            f'{yaw_error:.2f} rad) after Nav2 was blocked near the destination'
         )
 
     def run_blocked_pose_recovery(
@@ -3869,8 +4230,32 @@ class WebBridgeNode(Node):
         scan_detail: str,
     ) -> None:
         command_id = str(command.get('command_id', ''))
+        attempt_index = max(
+            0, int(command.get('_blocked_pose_recovery_attempt', 0))
+        )
         try:
-            if escape_action == 'arc':
+            if escape_action == 'forward':
+                maneuver = 'guarded forward'
+                self.send_command_status(
+                    command,
+                    'started',
+                    'Nav2 reported a blocked start; checking a guarded '
+                    'forward escape',
+                )
+                escaped, escape_output = self.guarded_forward_for_recovery()
+            elif escape_action == 'forward_arc':
+                direction = 'left' if escape_value > 0.0 else 'right'
+                maneuver = f'guarded rolling forward {direction} arc'
+                self.send_command_status(
+                    command,
+                    'started',
+                    f'Nav2 reported a blocked start; checking a forward '
+                    f'{direction} arc',
+                )
+                escaped, escape_output = self.guarded_forward_arc_for_recovery(
+                    escape_value
+                )
+            elif escape_action == 'arc':
                 direction = 'left' if escape_value > 0.0 else 'right'
                 maneuver = f'guarded rolling {direction} arc'
                 self.send_command_status(
@@ -3899,9 +4284,27 @@ class WebBridgeNode(Node):
                 )
                 escaped, escape_output = self.guarded_reverse_for_recovery()
             if not escaped:
+                attempted_values = (
+                    {float(escape_value)} if escape_action == 'arc' else set()
+                )
+                alternative_ok, alternative_detail = (
+                    self.run_alternative_escape_maneuvers(
+                        command_id,
+                        attempted_turn_values=attempted_values,
+                    )
+                )
+                if alternative_ok:
+                    escape_output = (
+                        f'{escape_output or "initial maneuver refused"}; '
+                        f'{alternative_detail}'
+                    )
+                    maneuver = 'alternative guarded escape'
+                    escaped = True
+            if not escaped:
                 detail = (
                     f'{original_detail}; {maneuver} was stopped or refused '
-                    f'({scan_detail}): {escape_output or "no response"}'
+                    f'({scan_detail}): {escape_output or "no response"}; '
+                    f'alternatives: {alternative_detail}'
                 )
                 self.get_logger().error(
                     f'Blocked-pose recovery for {command_id} failed: {detail}'
@@ -3923,7 +4326,10 @@ class WebBridgeNode(Node):
 
             if escape_action == 'back_up':
                 maneuver_ok, maneuver_detail = (
-                    self.run_alternative_escape_maneuvers(command_id)
+                    self.run_alternative_escape_maneuvers(
+                        command_id,
+                        allow_reverse_only=True,
+                    )
                 )
             else:
                 maneuver_ok = True
@@ -3987,6 +4393,7 @@ class WebBridgeNode(Node):
                 self.send_navigation_result(command, 'aborted', detail[:500])
                 return
 
+            command['_blocked_pose_recovery_attempt'] = attempt_index + 1
             command['_navigation_started_monotonic'] = 0.0
             self.command_queue.put(command)
             self.get_logger().warning(
@@ -4096,6 +4503,27 @@ class WebBridgeNode(Node):
                     'command_id': command_id,
                     'accepted': False,
                     'detail': 'Invalid navigate_to_pose command',
+                },
+            )
+            return
+
+        readiness_rejection = self.navigation_readiness_rejection()
+        if readiness_rejection is not None:
+            await self.send_json(
+                websocket,
+                self.command_status_payload(
+                    message,
+                    'rejected',
+                    readiness_rejection,
+                ),
+            )
+            await self.send_json(
+                websocket,
+                {
+                    'type': 'command_ack',
+                    'command_id': command_id,
+                    'accepted': False,
+                    'detail': readiness_rejection,
                 },
             )
             return
@@ -5388,6 +5816,7 @@ class WebBridgeNode(Node):
                 command_id
             )
             return
+        error_code = int(getattr(result, 'error_code', 0))
 
         with self.command_lock:
             cancel_request = (
@@ -5426,6 +5855,8 @@ class WebBridgeNode(Node):
                         'cancellation completed'
                     )
                 )
+                if error_code:
+                    detail = f'{detail} (error_code={error_code})'
 
             self.get_logger().info(
                 'Navigation stopped for cancelled '
@@ -5470,10 +5901,9 @@ class WebBridgeNode(Node):
                 'error_msg',
                 '',
             )
-            detail = (
-                error_message
-                or 'Nav2 goal was aborted'
-            )
+            detail = navigation_abort_detail(error_code, error_message)
+            if error_code:
+                detail = f'{detail} (error_code={error_code})'
             self.get_logger().error(
                 'Navigation aborted for '
                 f'{command_id}: {detail}'
@@ -5489,8 +5919,21 @@ class WebBridgeNode(Node):
                 self.get_logger().warning(
                     f'Navigation accepted near goal for {command_id}: {detail}'
                 )
-            elif self.maybe_start_blocked_pose_recovery(command, detail):
+            elif self.maybe_start_blocked_pose_recovery(
+                command,
+                detail,
+                error_code,
+            ):
                 return
+
+        WebBridgeNode.publish_navigation_event(
+            self,
+            command,
+            f'navigation_{navigation_status}',
+            detail,
+            error_code=error_code,
+            goal_status=int(status),
+        )
 
         self.send_navigation_result(
             command,
@@ -5660,12 +6103,29 @@ class WebBridgeNode(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = WebBridgeNode()
+    recorder = BlackBoxRecorder(parameter_overrides=[
+        Parameter(
+            'directory', value='/var/lib/indoor-delivery-robot/black-box'),
+        Parameter(
+            'incident_directory',
+            value='/var/lib/indoor-delivery-robot/incidents'),
+        Parameter('retention_seconds', value=300.0),
+        Parameter('max_topic_hz', value=1.0),
+        Parameter('record_scan', value=False),
+        Parameter('record_tf', value=False),
+        Parameter('record_extended_navigation', value=False),
+    ])
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    executor.add_node(recorder)
 
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        executor.shutdown()
+        recorder.destroy_node()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

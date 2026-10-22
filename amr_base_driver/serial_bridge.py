@@ -1,8 +1,10 @@
 import binascii
 import math
 import os
+import select
 import struct
 import termios
+import threading
 import time
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -11,8 +13,11 @@ from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu, JointState
 from std_srvs.srv import Empty, SetBool, Trigger
+
+from .imu_bias import StationaryBias
 
 
 TELEMETRY_MAGIC = b'\x5a\xa5'
@@ -27,6 +32,35 @@ def crc16_ccitt(data):
 def wrapped_int32_delta(current, previous):
     delta = (current - previous) & 0xFFFFFFFF
     return delta - 0x100000000 if delta & 0x80000000 else delta
+
+
+def trim_straight_wheel_rpm(left_rpm, right_rpm, measured_left_rpm,
+                            measured_right_rpm, gain, maximum_trim_rpm):
+    """Apply a small encoder trim while preserving average forward speed."""
+    if left_rpm * right_rpm <= 0.0:
+        return left_rpm, right_rpm
+    measured_peak = max(abs(measured_left_rpm), abs(measured_right_rpm))
+    if measured_peak <= 3.0:
+        return left_rpm, right_rpm
+    correction = gain * (abs(measured_right_rpm) - abs(measured_left_rpm))
+    limit = min(maximum_trim_rpm, 0.9 * min(abs(left_rpm), abs(right_rpm)))
+    correction = max(-limit, min(limit, correction))
+    direction = math.copysign(1.0, left_rpm)
+    return (
+        left_rpm + direction * correction,
+        right_rpm - direction * correction,
+    )
+
+
+def wheel_is_stalled(target_rpm, measured_rpm, command_age, *,
+                     minimum_target_rpm, maximum_measured_rpm,
+                     timeout_seconds):
+    """Detect a sustained, trackable command with no wheel motion."""
+    return (
+        abs(float(target_rpm)) >= float(minimum_target_rpm)
+        and abs(float(measured_rpm)) <= float(maximum_measured_rpm)
+        and float(command_age) >= float(timeout_seconds)
+    )
 
 
 def yaw_quaternion(yaw):
@@ -48,7 +82,14 @@ class SerialBridge(Node):
         self.declare_parameter('right_cpr', 2367.0)
         self.declare_parameter('accel_scale', 0.9372)
         self.declare_parameter('max_rpm', 90.0)
+        self.declare_parameter('straight_trim_gain', 0.15)
+        self.declare_parameter('straight_trim_max_rpm', 3.0)
         self.declare_parameter('cmd_vel_timeout', 0.25)
+        self.declare_parameter('stall_guard_enabled', True)
+        self.declare_parameter('stall_guard_min_target_rpm', 20.0)
+        self.declare_parameter('stall_guard_max_measured_rpm', 3.0)
+        self.declare_parameter('stall_guard_timeout_seconds', 1.2)
+        self.declare_parameter('stall_guard_recent_seconds', 30.0)
         self.declare_parameter('telemetry_publish_divisor', 2)
         self.declare_parameter('enable_motors', False)
         self.declare_parameter('odom_frame', 'odom')
@@ -63,7 +104,27 @@ class SerialBridge(Node):
         self.right_cpr = float(self.get_parameter('right_cpr').value)
         self.accel_scale = float(self.get_parameter('accel_scale').value)
         self.max_rpm = float(self.get_parameter('max_rpm').value)
+        self.straight_trim_gain = max(
+            0.0, float(self.get_parameter('straight_trim_gain').value))
+        self.straight_trim_max_rpm = max(
+            0.0, float(self.get_parameter('straight_trim_max_rpm').value))
         self.cmd_timeout = float(self.get_parameter('cmd_vel_timeout').value)
+        self.stall_guard_enabled = bool(
+            self.get_parameter('stall_guard_enabled').value)
+        self.stall_guard_min_target_rpm = max(
+            0.0, float(self.get_parameter('stall_guard_min_target_rpm').value))
+        self.stall_guard_max_measured_rpm = max(
+            0.0,
+            float(self.get_parameter('stall_guard_max_measured_rpm').value),
+        )
+        self.stall_guard_timeout_seconds = max(
+            0.5,
+            float(self.get_parameter('stall_guard_timeout_seconds').value),
+        )
+        self.stall_guard_recent_seconds = max(
+            self.stall_guard_timeout_seconds,
+            float(self.get_parameter('stall_guard_recent_seconds').value),
+        )
         self.telemetry_publish_divisor = max(
             1,
             int(self.get_parameter('telemetry_publish_divisor').value),
@@ -74,6 +135,9 @@ class SerialBridge(Node):
         self.imu_frame = self.get_parameter('imu_frame').value
 
         self.serial_port = None
+        self.serial_lock = threading.RLock()
+        self.telemetry_lock = threading.Lock()
+        self.reader_stop = threading.Event()
         self.rx_buffer = bytearray()
         self.last_open_attempt = 0.0
         self.last_telemetry_monotonic = 0.0
@@ -81,6 +145,17 @@ class SerialBridge(Node):
         self.last_diag_monotonic = 0.0
         self.command_sequence = 0
         self.telemetry_count = 0
+        self.telemetry_revision = 0
+        self.published_telemetry_revision = 0
+        self.latest_telemetry = None
+        self.maximum_telemetry_gap = 0.0
+        self.telemetry_gap_overrun_count = 0
+        self.previous_telemetry_sequence = None
+        self.previous_telemetry_mcu_ms = None
+        self.maximum_mcu_telemetry_gap_ms = 0
+        self.missed_telemetry_frames = 0
+        self.mcu_restart_count = 0
+        self.diagnostic_requested = False
         self.parse_errors = 0
         self.mcu_flags = 0
         self.mcu_fault = 0
@@ -98,6 +173,15 @@ class SerialBridge(Node):
         self.wheel_linear_mps = 0.0
         self.wheel_angular_rps = 0.0
         self.imu_angular_z_rps = 0.0
+        self.imu_bias_estimator = StationaryBias()
+        self.imu_samples = 0
+        self.last_imu_motion_monotonic = -100.0
+        self.drive_blocked = False
+        self.blocked_left = False
+        self.blocked_right = False
+        self.stall_candidate_started = [None, None]
+        self.last_drive_stall_monotonic = 0.0
+        self.blocked_target_rpm = (0.0, 0.0)
         self.previous_left = None
         self.previous_right = None
         self.previous_mcu_ms = None
@@ -105,8 +189,14 @@ class SerialBridge(Node):
         self.y = 0.0
         self.yaw = 0.0
 
-        self.imu_pub = self.create_publisher(Imu, 'imu/data_raw', 20)
-        self.odom_pub = self.create_publisher(Odometry, 'wheel/odometry', 20)
+        # These are live sensor streams, not durable state. Best-effort keeps
+        # a slow DDS reader from blocking the callback that drains the UART.
+        self.imu_pub = self.create_publisher(
+            Imu, 'imu/data_raw', qos_profile_sensor_data)
+        self.corrected_imu_pub = self.create_publisher(
+            Imu, 'imu/data', qos_profile_sensor_data)
+        self.odom_pub = self.create_publisher(
+            Odometry, 'wheel/odometry', qos_profile_sensor_data)
         self.joint_pub = self.create_publisher(JointState, 'joint_states', 20)
         self.diag_pub = self.create_publisher(
             DiagnosticArray, 'diagnostics', 10)
@@ -116,9 +206,15 @@ class SerialBridge(Node):
             SetBool, 'set_motors_enabled', self.set_motors_enabled)
         self.create_service(
             Trigger, 'clear_motor_fault', self.clear_motor_fault)
-        # 50 Hz is well above the MCU telemetry rate and avoids waking the
-        # Python executor 100 times per second just to receive EAGAIN.
-        self.create_timer(0.02, self.io_tick)
+        # UART reading is isolated from ROS/DDS publishing so executor load
+        # cannot make healthy ESP32 telemetry appear stale.
+        self.reader_thread = threading.Thread(
+            target=self.serial_reader_loop,
+            name='esp32-telemetry-reader',
+            daemon=True,
+        )
+        self.reader_thread.start()
+        self.create_timer(0.02, self.publish_telemetry_tick)
         self.create_timer(0.10, self.command_tick)
         # Normal diagnostics are low-rate to keep DDS/JSON merging off the C4
         # hot path. Fault and pre-stall transitions publish immediately below.
@@ -142,6 +238,7 @@ class SerialBridge(Node):
         self.requested_linear = 0.0
         self.requested_angular = 0.0
         self.last_cmd_monotonic = 0.0
+        self.clear_drive_blocked()
         self.write_line('STOP')
         self.write_line('CLEAR')
         response.success = True
@@ -154,6 +251,7 @@ class SerialBridge(Node):
         self.requested_linear = 0.0
         self.requested_angular = 0.0
         self.last_cmd_monotonic = 0.0
+        self.clear_drive_blocked()
         self.write_line('STOP')
 
         if not request.data:
@@ -216,45 +314,87 @@ class SerialBridge(Node):
             attributes[5] = termios.B115200
             termios.tcsetattr(descriptor, termios.TCSANOW, attributes)
             termios.tcflush(descriptor, termios.TCIFLUSH)
-            self.serial_port = descriptor
-            self.rx_buffer.clear()
+            with self.serial_lock:
+                self.serial_port = descriptor
+                self.rx_buffer.clear()
             self.get_logger().info('ESP32 serial port connected')
         except OSError as error:
             self.serial_port = None
             self.get_logger().warning(f'Waiting for ESP32 serial port: {error}')
 
     def close_serial(self, error):
-        if self.serial_port is not None:
-            try:
-                os.close(self.serial_port)
-            except OSError:
-                pass
-        self.serial_port = None
+        with self.serial_lock:
+            if self.serial_port is not None:
+                try:
+                    os.close(self.serial_port)
+                except OSError:
+                    pass
+            self.serial_port = None
         self.get_logger().error(f'ESP32 serial disconnected: {error}')
 
-    def io_tick(self):
-        if self.serial_port is None:
-            self.open_serial()
-            return
-        try:
+    def serial_reader_loop(self):
+        """Drain UART independently from the ROS executor."""
+        while not self.reader_stop.is_set():
+            with self.serial_lock:
+                descriptor = self.serial_port
+            if descriptor is None:
+                self.open_serial()
+                self.reader_stop.wait(0.02)
+                continue
             try:
-                self.rx_buffer.extend(os.read(self.serial_port, 4096))
-            except BlockingIOError:
-                pass
-            self.extract_telemetry_frames()
-            if len(self.rx_buffer) > 4096:
-                self.rx_buffer.clear()
-                self.parse_errors += 1
-        except OSError as error:
-            self.close_serial(error)
+                readable, _, _ = select.select([descriptor], [], [], 0.05)
+                if not readable:
+                    continue
+                data = os.read(descriptor, 4096)
+                if not data:
+                    raise OSError('ESP32 UART returned EOF')
+                self.rx_buffer.extend(data)
+                self.extract_telemetry_frames()
+                if len(self.rx_buffer) > 4096:
+                    self.rx_buffer.clear()
+                    self.parse_errors += 1
+            except (OSError, ValueError) as error:
+                if not self.reader_stop.is_set():
+                    self.close_serial(error)
+
+    def publish_telemetry_tick(self):
+        with self.telemetry_lock:
+            if self.telemetry_revision == self.published_telemetry_revision:
+                return
+            self.published_telemetry_revision = self.telemetry_revision
+            telemetry = self.latest_telemetry
+            publish_diagnostic = self.diagnostic_requested
+            self.diagnostic_requested = False
+        if telemetry is None:
+            return
+        if publish_diagnostic:
+            self.diagnostic_tick()
+        if telemetry['count'] % self.telemetry_publish_divisor:
+            return
+        stamp = self.get_clock().now().to_msg()
+        self.publish_imu(stamp, telemetry['accel'], telemetry['gyro'])
+        self.publish_joint_state(
+            stamp,
+            telemetry['left_count'],
+            telemetry['right_count'],
+            telemetry['left_rpm'],
+            telemetry['right_rpm'],
+        )
+        self.publish_odometry(
+            stamp,
+            telemetry['mcu_ms'],
+            telemetry['left_count'],
+            telemetry['right_count'],
+        )
 
     def write_line(self, line):
-        if self.serial_port is None:
-            return
-        try:
-            os.write(self.serial_port, (line + '\n').encode('ascii'))
-        except (OSError, BlockingIOError) as error:
-            self.close_serial(error)
+        with self.serial_lock:
+            if self.serial_port is None:
+                return
+            try:
+                os.write(self.serial_port, (line + '\n').encode('ascii'))
+            except (OSError, BlockingIOError) as error:
+                self.close_serial(error)
 
     def command_tick(self):
         left_rpm = right_rpm = 0.0
@@ -280,11 +420,93 @@ class SerialBridge(Node):
                 ratio = self.max_rpm / peak
                 left_rpm *= ratio
                 right_rpm *= ratio
+            # Preserve differential-drive curvature.  Independent wheel floors
+            # turned shallow arcs into pivots and made Nav2 correct repeatedly.
+            if abs(self.requested_angular) <= 0.03:
+                left_rpm, right_rpm = trim_straight_wheel_rpm(
+                    left_rpm,
+                    right_rpm,
+                    self.measured_left_rpm,
+                    self.measured_right_rpm,
+                    self.straight_trim_gain,
+                    self.straight_trim_max_rpm,
+                )
+                peak = max(abs(left_rpm), abs(right_rpm))
+                if peak > self.max_rpm:
+                    left_rpm *= self.max_rpm / peak
+                    right_rpm *= self.max_rpm / peak
+        if self.drive_blocked:
+            old_left, old_right = self.blocked_target_rpm
+            reversed_direction = any(
+                old * new < 0.0
+                for old, new in ((old_left, left_rpm), (old_right, right_rpm))
+            )
+            stopped = max(abs(left_rpm), abs(right_rpm)) < 0.5
+            if stopped or reversed_direction:
+                self.clear_drive_blocked()
+            else:
+                self.target_left_rpm = left_rpm
+                self.target_right_rpm = right_rpm
+                self.write_line('STOP')
+                return
+
         self.target_left_rpm = left_rpm
         self.target_right_rpm = right_rpm
+        self.update_stall_guard(now, left_rpm, right_rpm)
+        if self.drive_blocked:
+            self.write_line('STOP')
+            return
         self.write_line(
             f'CMD,{self.command_sequence},{left_rpm:.3f},{right_rpm:.3f}')
         self.command_sequence = (self.command_sequence + 1) & 0xFFFFFFFF
+
+    def clear_drive_blocked(self):
+        self.drive_blocked = False
+        self.blocked_left = False
+        self.blocked_right = False
+        self.stall_candidate_started = [None, None]
+        self.blocked_target_rpm = (0.0, 0.0)
+
+    def update_stall_guard(self, now, left_rpm, right_rpm):
+        if not self.stall_guard_enabled:
+            self.stall_candidate_started = [None, None]
+            return
+        targets = (left_rpm, right_rpm)
+        measured = (self.measured_left_rpm, self.measured_right_rpm)
+        stalled = [False, False]
+        for index, (target, actual) in enumerate(zip(targets, measured)):
+            if (
+                abs(target) < self.stall_guard_min_target_rpm
+                or abs(actual) > self.stall_guard_max_measured_rpm
+            ):
+                self.stall_candidate_started[index] = None
+                continue
+            started = self.stall_candidate_started[index]
+            if started is None:
+                self.stall_candidate_started[index] = now
+                continue
+            stalled[index] = wheel_is_stalled(
+                target,
+                actual,
+                now - started,
+                minimum_target_rpm=self.stall_guard_min_target_rpm,
+                maximum_measured_rpm=self.stall_guard_max_measured_rpm,
+                timeout_seconds=self.stall_guard_timeout_seconds,
+            )
+        if not any(stalled):
+            return
+        self.drive_blocked = True
+        self.blocked_left, self.blocked_right = stalled
+        self.blocked_target_rpm = targets
+        self.last_drive_stall_monotonic = now
+        sides = '/'.join(
+            side for side, is_stalled in zip(('left', 'right'), stalled)
+            if is_stalled
+        )
+        self.get_logger().error(
+            f'Encoder stall guard stopped both motors: {sides} wheel did not move'
+        )
+        self.diagnostic_tick()
 
     def extract_telemetry_frames(self):
         while len(self.rx_buffer) >= 4:
@@ -323,55 +545,128 @@ class SerialBridge(Node):
             self.parse_errors += 1
             return
         mcu_ms = values[4]
+        sequence = values[3]
         left_count, right_count = values[5:7]
         left_rpm, right_rpm = (value / 100.0 for value in values[7:9])
         accel = [value / 1000.0 for value in values[9:12]]
         gyro = [value / 100.0 for value in values[12:15]]
         self.imu_angular_z_rps = gyro[2] * math.pi / 180.0
         self.temperature = values[15] / 100.0
-        previous_mcu_fault = self.mcu_fault
-        self.mcu_flags = values[16]
-        self.mcu_fault = values[17]
-        self.encoder_left_count = left_count
-        self.encoder_right_count = right_count
-        self.measured_left_rpm = left_rpm
-        self.measured_right_rpm = right_rpm
-
-        self.last_telemetry_monotonic = time.monotonic()
-        if self.mcu_fault != previous_mcu_fault:
-            self.diagnostic_tick()
-        self.telemetry_count += 1
-        if self.telemetry_count % self.telemetry_publish_divisor:
-            return
-        stamp = self.get_clock().now().to_msg()
-        self.publish_imu(stamp, accel, gyro)
-        self.publish_joint_state(stamp, left_count, right_count,
-                                 left_rpm, right_rpm)
-        self.publish_odometry(stamp, mcu_ms, left_count, right_count)
+        received_at = time.monotonic()
+        with self.telemetry_lock:
+            previous_mcu_fault = self.mcu_fault
+            if self.last_telemetry_monotonic:
+                gap = received_at - self.last_telemetry_monotonic
+                self.maximum_telemetry_gap = max(
+                    self.maximum_telemetry_gap, gap)
+                if gap > 0.3:
+                    self.telemetry_gap_overrun_count += 1
+            telemetry_restarted = (
+                self.previous_telemetry_sequence is not None
+                and self.previous_telemetry_mcu_ms is not None
+                and sequence < self.previous_telemetry_sequence
+                and mcu_ms < self.previous_telemetry_mcu_ms
+            )
+            if telemetry_restarted:
+                self.mcu_restart_count += 1
+            else:
+                if self.previous_telemetry_sequence is not None:
+                    sequence_delta = (
+                        sequence - self.previous_telemetry_sequence
+                    ) & 0xFFFFFFFF
+                    self.missed_telemetry_frames += max(
+                        0, sequence_delta - 1)
+                if self.previous_telemetry_mcu_ms is not None:
+                    mcu_gap_ms = (
+                        mcu_ms - self.previous_telemetry_mcu_ms
+                    ) & 0xFFFFFFFF
+                    self.maximum_mcu_telemetry_gap_ms = max(
+                        self.maximum_mcu_telemetry_gap_ms,
+                        mcu_gap_ms,
+                    )
+            self.previous_telemetry_sequence = sequence
+            self.previous_telemetry_mcu_ms = mcu_ms
+            self.mcu_flags = values[16]
+            self.mcu_fault = values[17]
+            self.encoder_left_count = left_count
+            self.encoder_right_count = right_count
+            self.measured_left_rpm = left_rpm
+            self.measured_right_rpm = right_rpm
+            self.last_telemetry_monotonic = received_at
+            self.telemetry_count += 1
+            self.telemetry_revision += 1
+            self.latest_telemetry = {
+                'count': self.telemetry_count,
+                'mcu_ms': mcu_ms,
+                'left_count': left_count,
+                'right_count': right_count,
+                'left_rpm': left_rpm,
+                'right_rpm': right_rpm,
+                'accel': accel,
+                'gyro': gyro,
+            }
+            if self.mcu_fault != previous_mcu_fault:
+                self.diagnostic_requested = True
 
     def publish_imu(self, stamp, accel_g, gyro_dps):
+        degree_to_radian = math.pi / 180.0
+        gyro = [value * degree_to_radian for value in gyro_dps]
+        gravity = 9.80665 * self.accel_scale
+        acceleration = [value * gravity for value in accel_g]
+
+        raw = self.make_imu_message(stamp, gyro, acceleration, 2.5e-5)
+        self.imu_pub.publish(raw)
+
+        now = time.monotonic()
+        moving = (
+            abs(self.wheel_linear_mps) > 0.001
+            or abs(self.wheel_angular_rps) > 0.001
+        )
+        if moving:
+            self.last_imu_motion_monotonic = now
+        command_recent = (
+            self.last_cmd_monotonic > 0.0
+            and now - self.last_cmd_monotonic < 0.5
+        )
+        commanded = command_recent and (
+            abs(self.requested_linear) > 0.001
+            or abs(self.requested_angular) > 0.001
+        )
+        stationary = (
+            now - self.last_imu_motion_monotonic > 2.0
+            and not commanded
+        )
+        acceleration_norm = math.sqrt(sum(value * value for value in acceleration))
+        bias = self.imu_bias_estimator.update(
+            now, gyro, acceleration_norm, stationary)
+        corrected_gyro = [value - offset for value, offset in zip(gyro, bias)]
+        variance = 2.5e-5 if self.imu_bias_estimator.ready else 4.0e-4
+        corrected = self.make_imu_message(
+            stamp, corrected_gyro, acceleration, variance)
+        self.corrected_imu_pub.publish(corrected)
+        self.imu_samples += 1
+
+    def make_imu_message(self, stamp, gyro, acceleration, gyro_variance):
+        """Build one IMU sample without a DDS subscribe/republish process."""
         message = Imu()
         message.header.stamp = stamp
         message.header.frame_id = self.imu_frame
         message.orientation_covariance[0] = -1.0
-        degree_to_radian = math.pi / 180.0
-        message.angular_velocity.x = gyro_dps[0] * degree_to_radian
-        message.angular_velocity.y = gyro_dps[1] * degree_to_radian
-        message.angular_velocity.z = gyro_dps[2] * degree_to_radian
-        gyro_variance = 2.5e-5
+        message.angular_velocity.x = gyro[0]
+        message.angular_velocity.y = gyro[1]
+        message.angular_velocity.z = gyro[2]
         message.angular_velocity_covariance = [
             gyro_variance, 0.0, 0.0,
             0.0, gyro_variance, 0.0,
             0.0, 0.0, gyro_variance]
-        gravity = 9.80665 * self.accel_scale
-        message.linear_acceleration.x = accel_g[0] * gravity
-        message.linear_acceleration.y = accel_g[1] * gravity
-        message.linear_acceleration.z = accel_g[2] * gravity
+        message.linear_acceleration.x = acceleration[0]
+        message.linear_acceleration.y = acceleration[1]
+        message.linear_acceleration.z = acceleration[2]
         message.linear_acceleration_covariance = [
             0.04, 0.0, 0.0,
             0.0, 0.04, 0.0,
             0.0, 0.0, 0.04]
-        self.imu_pub.publish(message)
+        return message
 
     def publish_joint_state(self, stamp, left_count, right_count,
                             left_rpm, right_rpm):
@@ -450,6 +745,21 @@ class SerialBridge(Node):
             KeyValue(key='telemetry_age_s', value=f'{age:.3f}'),
             KeyValue(key='telemetry_count', value=str(self.telemetry_count)),
             KeyValue(key='parse_errors', value=str(self.parse_errors)),
+            KeyValue(
+                key='maximum_telemetry_gap_s',
+                value=f'{self.maximum_telemetry_gap:.3f}'),
+            KeyValue(
+                key='telemetry_gap_overrun_count',
+                value=str(self.telemetry_gap_overrun_count)),
+            KeyValue(
+                key='maximum_mcu_telemetry_gap_ms',
+                value=str(self.maximum_mcu_telemetry_gap_ms)),
+            KeyValue(
+                key='missed_telemetry_frames',
+                value=str(self.missed_telemetry_frames)),
+            KeyValue(
+                key='mcu_restart_count',
+                value=str(self.mcu_restart_count)),
         ]
 
         mcu = DiagnosticStatus()
@@ -473,8 +783,18 @@ class SerialBridge(Node):
         drive = DiagnosticStatus()
         drive.name = 'Base drive telemetry'
         drive.hardware_id = 'odroid-base-driver'
-        drive.level = DiagnosticStatus.OK
-        drive.message = 'Wheel telemetry available'
+        stall_age = (
+            now - self.last_drive_stall_monotonic
+            if self.last_drive_stall_monotonic else float('inf')
+        )
+        stall_recent = stall_age <= self.stall_guard_recent_seconds
+        drive.level = (
+            DiagnosticStatus.ERROR if self.drive_blocked else DiagnosticStatus.OK
+        )
+        drive.message = (
+            'Encoder stall guard is holding motor output at zero'
+            if self.drive_blocked else 'Wheel telemetry available'
+        )
         drive.values = [
             KeyValue(key='motors_enabled', value=str(self.motors_enabled)),
             KeyValue(
@@ -506,16 +826,43 @@ class SerialBridge(Node):
             KeyValue(
                 key='imu_angular_z_rps',
                 value=f'{self.imu_angular_z_rps:.4f}'),
+            KeyValue(key='drive_blocked', value=str(self.drive_blocked)),
+            KeyValue(key='blocked_left', value=str(self.blocked_left)),
+            KeyValue(key='blocked_right', value=str(self.blocked_right)),
+            KeyValue(key='drive_stall_recent', value=str(stall_recent)),
+            KeyValue(
+                key='drive_stall_age_s',
+                value=f'{stall_age:.3f}' if math.isfinite(stall_age) else 'inf'),
         ]
+
+        imu = DiagnosticStatus()
+        imu.name = 'MPU6050 residual bias'
+        imu.hardware_id = 'mpu6050'
+        imu.level = (
+            DiagnosticStatus.OK
+            if self.imu_bias_estimator.ready else DiagnosticStatus.WARN
+        )
+        imu.message = (
+            'Stationary bias calibrated'
+            if self.imu_bias_estimator.ready
+            else 'Waiting for five seconds of stable stationary data'
+        )
+        imu.values = [KeyValue(key='samples', value=str(self.imu_samples))]
+        for axis, bias in zip('xyz', self.imu_bias_estimator.bias):
+            imu.values.append(KeyValue(
+                key=f'gyro_bias_{axis}_rad_s', value=f'{bias:.6f}'))
 
         array = DiagnosticArray()
         array.header.stamp = self.get_clock().now().to_msg()
-        array.status = [serial, mcu, drive]
+        array.status = [serial, mcu, drive, imu]
         self.diag_pub.publish(array)
 
     def destroy_node(self):
-        if self.serial_port is not None:
-            self.write_line('STOP')
+        self.reader_stop.set()
+        self.write_line('STOP')
+        if self.reader_thread.is_alive():
+            self.reader_thread.join(timeout=1.0)
+        with self.serial_lock:
             if self.serial_port is not None:
                 os.close(self.serial_port)
                 self.serial_port = None

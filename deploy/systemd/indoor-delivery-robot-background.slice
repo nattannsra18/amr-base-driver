@@ -1,0 +1,7 @@
+[Unit]
+Description=Indoor Delivery Robot Background Workload
+
+[Slice]
+CPUWeight=10
+AllowedCPUs=0-2
+

@@ -45,3 +45,9 @@ amr_web_bridge:
     path_max_poses: 500
     path_publish_period: 0.5
     emergency_stop_zero_rate: 10.0
+    # Nav2 never moves blindly after a blocked controller result. Permit one
+    # Agent maneuver only after fresh scan, motor, localization, and TF gates.
+    enable_blocked_pose_motion_recovery: true
+    max_blocked_pose_recovery_attempts: 1
+    near_goal_acceptance_distance_m: 0.20
+    near_goal_acceptance_requires_heading: false

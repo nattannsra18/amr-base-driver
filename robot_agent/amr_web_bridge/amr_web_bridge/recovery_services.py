@@ -3,7 +3,13 @@
 import threading
 
 
-def call_service(client, request, *, timeout_seconds=2.0):
+def call_service(
+    client,
+    request,
+    *,
+    timeout_seconds=2.0,
+    discovery_timeout_seconds=0.25,
+):
     """Return (response, detail); the ROS executor must keep spinning.
 
     Do not call from a ROS callback on the single-threaded executor. A timeout
@@ -12,7 +18,7 @@ def call_service(client, request, *, timeout_seconds=2.0):
     """
     future = None
     try:
-        if not client.wait_for_service(timeout_sec=0.25):
+        if not client.wait_for_service(timeout_sec=discovery_timeout_seconds):
             return None, 'service is unavailable'
         finished = threading.Event()
         future = client.call_async(request)

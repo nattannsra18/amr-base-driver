@@ -33,6 +33,21 @@ def test_guarded_reverse_propagates_refusal():
     assert 'blocked' in output
 
 
+def test_guarded_forward_uses_forward_service():
+    calls = []
+
+    def run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout="std_srvs.srv.Trigger_Response(success=True, message='done')",
+            stderr='',
+        )
+
+    assert NavigationRecoveryRunner(run=run).guarded_forward()[0]
+    assert calls[0][0][3] == '/guarded_forward_escape'
+
+
 def test_guarded_arc_selects_service_from_yaw_sign():
     calls = []
 
@@ -49,6 +64,25 @@ def test_guarded_arc_selects_service_from_yaw_sign():
     assert runner.guarded_arc(-0.22)[0]
     assert calls[0][0][3] == '/guarded_arc_escape_left'
     assert calls[1][0][3] == '/guarded_arc_escape_right'
+
+
+def test_guarded_forward_arc_selects_service_from_yaw_sign():
+    calls = []
+
+    def run(arguments, **kwargs):
+        calls.append((arguments, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout="std_srvs.srv.Trigger_Response(success=True, message='done')",
+            stderr='',
+        )
+
+    runner = NavigationRecoveryRunner(run=run)
+
+    assert runner.guarded_forward_arc(0.22)[0]
+    assert runner.guarded_forward_arc(-0.22)[0]
+    assert calls[0][0][3] == '/guarded_forward_arc_escape_left'
+    assert calls[1][0][3] == '/guarded_forward_arc_escape_right'
 
 
 def test_clear_costmaps_allows_dds_service_discovery_time():
