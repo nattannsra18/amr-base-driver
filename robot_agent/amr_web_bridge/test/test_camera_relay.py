@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 from pathlib import Path
 import struct
+from types import SimpleNamespace
 
 import amr_web_bridge.camera_relay as camera_relay_module
 from amr_web_bridge.camera_relay import (
@@ -18,6 +19,7 @@ from amr_web_bridge.camera_relay import (
     CapturedJpeg,
     LatestJpegSource,
     pack_camera_frame,
+    RosCompressedJpegSource,
 )
 
 
@@ -74,6 +76,48 @@ def test_mjpeg_source_returns_new_frame_once_per_sequence():
 
     assert source.wait_for_frame(6, 0) == source.frame
     assert source.wait_for_frame(7, 0) is None
+
+
+def test_ros_compressed_source_forwards_jpeg_without_reencoding():
+    """Forward the existing JPEG and timestamp its wall-clock arrival."""
+    message = SimpleNamespace(
+        header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=12, nanosec=345),
+        ),
+        format='rgb8; jpeg compressed bgr8',
+        data=b'\xff\xd8gazebo\xff\xd9',
+    )
+
+    source = RosCompressedJpegSource('/camera/color/image_raw/compressed')
+    observed = []
+    source.set_frame_callback(observed.append)
+    source._on_image(message)
+
+    assert observed[0].sequence == 1
+    assert observed[0].captured_at_ns > 0
+    assert observed[0].data == message.data
+
+
+def test_ros_compressed_source_ignores_non_jpeg_and_inactive_frames():
+    """Ignore formats the browser cannot render and frames not requested."""
+    message = SimpleNamespace(
+        header=SimpleNamespace(
+            stamp=SimpleNamespace(sec=0, nanosec=0),
+        ),
+        format='png',
+        data=b'not-jpeg',
+    )
+
+    source = RosCompressedJpegSource('/camera/image/compressed')
+    observed = []
+    source.set_frame_callback(observed.append)
+    source._on_image(message)
+    source.set_active(False)
+    message.format = 'jpeg'
+    source._on_image(message)
+
+    assert observed == []
+    assert source.sequence == 0
 
 
 def test_camera_frame_envelope_carries_source_timestamps_without_base64():

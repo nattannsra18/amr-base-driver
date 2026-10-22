@@ -71,6 +71,7 @@ def test_reversal_runs_caster_sequence_then_resumes():
 
     assert core.last_drive_sign == -1
 
+
 def test_post_align_accepts_new_heading_instead_of_returning_to_old_yaw():
     core = DriveSupervisorCore(initial_alignment=False)
     core.reversal_sign = 1

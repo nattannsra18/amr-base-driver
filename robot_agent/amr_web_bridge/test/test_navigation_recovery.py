@@ -1,11 +1,10 @@
 from subprocess import CompletedProcess
 
-import pytest
-
 from amr_web_bridge.navigation_recovery import (
     classify_plan_failure,
     NavigationRecoveryRunner,
 )
+import pytest
 
 
 def test_classifies_required_navigation_failures():

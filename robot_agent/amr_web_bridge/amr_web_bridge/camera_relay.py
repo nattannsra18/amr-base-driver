@@ -190,6 +190,91 @@ class LatestJpegSource:
                     callback(captured)
 
 
+class RosCompressedJpegSource:
+    """Retain the latest JPEG from a ROS 2 CompressedImage topic."""
+
+    def __init__(self, topic: str):
+        """Prepare a demand-controlled subscription to topic."""
+        self.topic = topic
+        self.sequence = 0
+        self.active = threading.Event()
+        self.active.set()
+        self.frame_callback: Callable[[CapturedJpeg], None] | None = None
+        self.thread: threading.Thread | None = None
+        self.node = None
+        self.rclpy = None
+
+    def start(self) -> None:
+        """Start the ROS executor without blocking the relay event loop."""
+        if self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def stop(self) -> None:
+        """Stop the ROS executor and its worker thread."""
+        if self.rclpy is not None:
+            self.rclpy.shutdown()
+        if self.thread is not None:
+            self.thread.join(timeout=2.0)
+
+    def set_active(self, active: bool) -> None:
+        """Enable or suppress frame forwarding based on browser demand."""
+        if active:
+            self.active.set()
+        else:
+            self.active.clear()
+
+    def set_frame_callback(
+        self,
+        callback: Callable[[CapturedJpeg], None] | None,
+    ) -> None:
+        """Set the callback that receives the latest compressed frame."""
+        self.frame_callback = callback
+
+    def _run(self) -> None:
+        import rclpy
+        from rclpy.qos import qos_profile_sensor_data
+        from sensor_msgs.msg import CompressedImage
+
+        self.rclpy = rclpy
+        rclpy.init()
+        self.node = rclpy.create_node('gazebo_camera_relay')
+        self.node.create_subscription(
+            CompressedImage,
+            self.topic,
+            self._on_image,
+            qos_profile_sensor_data,
+        )
+        LOGGER.info('Reading ROS camera topic: %s', self.topic)
+        try:
+            rclpy.spin(self.node)
+        finally:
+            self.node.destroy_node()
+
+    def _on_image(self, message) -> None:
+        if not self.active.is_set():
+            return
+        image_format = str(message.format).lower()
+        if 'jpeg' not in image_format and 'jpg' not in image_format:
+            LOGGER.warning(
+                'Ignoring non-JPEG CompressedImage format: %s',
+                message.format,
+            )
+            return
+        self.sequence += 1
+        captured = CapturedJpeg(
+            sequence=self.sequence,
+            # Gazebo stamps use simulation time, while the browser measures
+            # latency against wall time.
+            captured_at_ns=time.time_ns(),
+            data=bytes(message.data),
+        )
+        callback = self.frame_callback
+        if callback is not None:
+            callback(captured)
+
+
 class CameraRelay:
     """Publish latest local JPEGs on a dedicated authenticated WSS channel."""
 
@@ -343,6 +428,7 @@ def main() -> None:
         'CAMERA_LOCAL_STREAM_URL',
         'http://127.0.0.1:8081/stream',
     ).strip()
+    ros_topic = os.getenv('CAMERA_ROS_COMPRESSED_TOPIC', '').strip()
     if not server_url or not credential_file:
         raise SystemExit(
             'ROBOT_CONTROL_URL and ROBOT_CREDENTIAL_FILE are required'
@@ -353,6 +439,8 @@ def main() -> None:
         camera_url,
         float(os.getenv('CAMERA_RELAY_FPS', '30')),
     )
+    if ros_topic:
+        relay.source = RosCompressedJpegSource(ros_topic)
     try:
         asyncio.run(relay.run())
     except KeyboardInterrupt:

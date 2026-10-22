@@ -17,7 +17,8 @@ def slew(current, target, limit_per_second, dt):
 
 
 class DriveSupervisorCore:
-    """Shape commands and handle forward/reverse caster realignment.
+    """
+    Shape commands and handle forward/reverse caster realignment.
 
     A passive caster cannot turn while the robot is stationary.  On a linear
     direction reversal this controller stops, creeps in the new direction,

@@ -11,7 +11,7 @@ from rclpy.node import Node
 from std_srvs.srv import Empty
 
 
-HELP = '''
+HELP = """
 Game-style safe keyboard control (press or hold a key)
 ------------------------------------------------------
  Q: forward-left   W: forward      E: forward-right
@@ -27,7 +27,7 @@ Esc or Ctrl-C: STOP and quit
 
 Releasing the key automatically commands zero after the deadman timeout.
 Keep the physical motor cutoff within reach.
-'''
+"""
 
 
 SPEED_PROFILES = {

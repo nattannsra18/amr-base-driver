@@ -43,7 +43,7 @@ class StationaryBias:
         if any(statistics.pstdev(a) > MAX_STATIONARY_GYRO_STD for a in axes):
             return list(self.bias)
         means = [statistics.mean(a) for a in axes]
-        alpha = 1.0 if not self.ready else 1.0-math.exp(-dt/30.0)
-        self.bias = [b+alpha*(m-b) for b,m in zip(self.bias, means)]
+        alpha = 1.0 if not self.ready else 1.0 - math.exp(-dt / 30.0)
+        self.bias = [b + alpha * (m - b) for b, m in zip(self.bias, means)]
         self.ready = True
         return list(self.bias)

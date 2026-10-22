@@ -1,5 +1,5 @@
-from amr_base_driver.safe_keyboard_teleop import DEFAULT_KEY_TIMEOUT
 from amr_base_driver.safe_keyboard_teleop import adjusted_speed
+from amr_base_driver.safe_keyboard_teleop import DEFAULT_KEY_TIMEOUT
 from amr_base_driver.safe_keyboard_teleop import mapping_limits
 from amr_base_driver.safe_keyboard_teleop import pivot_angular_speed
 

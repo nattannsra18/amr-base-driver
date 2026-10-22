@@ -56,7 +56,8 @@ class DriveSupervisor(Node):
         for name, value in defaults.items():
             self.declare_parameter(name, value)
 
-        value = lambda name: self.get_parameter(name).value
+        def value(name):
+            return self.get_parameter(name).value
         self.input_timeout = float(value('input_timeout'))
         self.odom_timeout = float(value('odom_timeout'))
         self.rate = float(value('control_rate'))
@@ -181,7 +182,10 @@ class DriveSupervisor(Node):
             KeyValue(key='state', value=self.core.state),
             KeyValue(key='input_age_s', value=f'{input_age:.3f}'),
             KeyValue(key='odom_age_s', value=f'{odom_age:.3f}'),
-            KeyValue(key='heading_error_deg', value=f'{math.degrees(self.core.heading_error):.2f}'),
+            KeyValue(
+                key='heading_error_deg',
+                value=f'{math.degrees(self.core.heading_error):.2f}',
+            ),
             KeyValue(key='output_linear', value=f'{self.core.output_linear:.3f}'),
             KeyValue(key='output_angular', value=f'{self.core.output_angular:.3f}'),
         ]

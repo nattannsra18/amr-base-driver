@@ -15,8 +15,8 @@ from typing import Any
 from uuid import uuid4
 
 from action_msgs.msg import GoalStatus
-from amr_base_driver.black_box_recorder import BlackBoxRecorder
 from ament_index_python.packages import get_package_share_directory
+from amr_base_driver.black_box_recorder import BlackBoxRecorder
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
 from lifecycle_msgs.srv import GetState
