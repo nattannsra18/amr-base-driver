@@ -415,6 +415,7 @@ class GuardedReverse(Node):
         self.declare_parameter('forward_start_clearance', 0.48)
         self.declare_parameter('forward_stop_clearance', 0.36)
         self.declare_parameter('sensor_timeout', 0.50)
+        self.declare_parameter('sensor_warmup_timeout', 1.50)
         self.declare_parameter('time_limit', 3.0)
         self.declare_parameter('arc_speed', 0.07)
         self.declare_parameter('wheel_separation', DEFAULT_WHEEL_SEPARATION)
@@ -449,6 +450,8 @@ class GuardedReverse(Node):
         ))
         self.sensor_timeout = min(1.0, max(0.20, float(
             self.get_parameter('sensor_timeout').value)))
+        self.sensor_warmup_timeout = min(2.0, max(0.50, float(
+            self.get_parameter('sensor_warmup_timeout').value)))
         self.time_limit = min(4.0, max(1.0, float(
             self.get_parameter('time_limit').value)))
         self.arc_speed = min(0.07, max(0.03, float(
@@ -492,58 +495,88 @@ class GuardedReverse(Node):
         self.latest_odom = None
         self.latest_yaw = None
         self.odom_monotonic = 0.0
-        callbacks = ReentrantCallbackGroup()
+        self.callbacks = ReentrantCallbackGroup()
         self.publisher = self.create_publisher(Twist, '/cmd_vel_recovery', 10)
-        self.create_subscription(
-            LaserScan,
-            str(self.get_parameter('scan_topic').value),
-            self.scan_callback,
-            qos_profile_sensor_data,
-            callback_group=callbacks,
-        )
-        self.create_subscription(
-            Odometry,
-            str(self.get_parameter('odom_topic').value),
-            self.odom_callback,
-            qos_profile_sensor_data,
-            callback_group=callbacks,
-        )
+        self.scan_subscription = None
+        self.odom_subscription = None
         self.create_service(
             Trigger,
             '/guarded_reverse_escape',
             self.reverse_callback,
-            callback_group=callbacks,
+            callback_group=self.callbacks,
         )
         self.create_service(
             Trigger,
             '/guarded_forward_escape',
             self.forward_callback,
-            callback_group=callbacks,
+            callback_group=self.callbacks,
         )
         self.create_service(
             Trigger,
             '/guarded_arc_escape_left',
             self.arc_left_callback,
-            callback_group=callbacks,
+            callback_group=self.callbacks,
         )
         self.create_service(
             Trigger,
             '/guarded_arc_escape_right',
             self.arc_right_callback,
-            callback_group=callbacks,
+            callback_group=self.callbacks,
         )
         self.create_service(
             Trigger,
             '/guarded_forward_arc_escape_left',
             self.forward_arc_left_callback,
-            callback_group=callbacks,
+            callback_group=self.callbacks,
         )
         self.create_service(
             Trigger,
             '/guarded_forward_arc_escape_right',
             self.forward_arc_right_callback,
-            callback_group=callbacks,
+            callback_group=self.callbacks,
         )
+
+    def start_sensor_streams(self):
+        """Subscribe only while a recovery request needs live sensor data."""
+        with self.data_lock:
+            self.latest_scan_geometry = None
+            self.scan_monotonic = 0.0
+            self.latest_odom = None
+            self.latest_yaw = None
+            self.odom_monotonic = 0.0
+        self.scan_subscription = self.create_subscription(
+            LaserScan,
+            str(self.get_parameter('scan_topic').value),
+            self.scan_callback,
+            qos_profile_sensor_data,
+            callback_group=self.callbacks,
+        )
+        self.odom_subscription = self.create_subscription(
+            Odometry,
+            str(self.get_parameter('odom_topic').value),
+            self.odom_callback,
+            qos_profile_sensor_data,
+            callback_group=self.callbacks,
+        )
+        deadline = time.monotonic() + self.sensor_warmup_timeout
+        while time.monotonic() < deadline:
+            with self.data_lock:
+                ready = (
+                    self.scan_monotonic > 0.0
+                    and self.odom_monotonic > 0.0
+                )
+            if ready:
+                return True
+            time.sleep(0.02)
+        return False
+
+    def stop_sensor_streams(self):
+        if self.scan_subscription is not None:
+            self.destroy_subscription(self.scan_subscription)
+            self.scan_subscription = None
+        if self.odom_subscription is not None:
+            self.destroy_subscription(self.odom_subscription)
+            self.odom_subscription = None
 
     def scan_callback(self, message):
         with self.data_lock:
@@ -637,11 +670,17 @@ class GuardedReverse(Node):
             response.message = 'A guarded reverse is already active'
             return response
         try:
+            if not self.start_sensor_streams():
+                response.success = False
+                response.message = (
+                    'Guarded reverse refused: sensors did not become ready')
+                return response
             return self.run_straight(response, motion_direction=-1)
         finally:
             for _ in range(5):
                 self.publish_stop()
                 time.sleep(0.05)
+            self.stop_sensor_streams()
             self.operation_lock.release()
 
     def forward_callback(self, _request, response):
@@ -650,11 +689,17 @@ class GuardedReverse(Node):
             response.message = 'A guarded escape is already active'
             return response
         try:
+            if not self.start_sensor_streams():
+                response.success = False
+                response.message = (
+                    'Guarded forward refused: sensors did not become ready')
+                return response
             return self.run_straight(response, motion_direction=1)
         finally:
             for _ in range(5):
                 self.publish_stop()
                 time.sleep(0.05)
+            self.stop_sensor_streams()
             self.operation_lock.release()
 
     def arc_left_callback(self, _request, response):
@@ -675,6 +720,10 @@ class GuardedReverse(Node):
             response.message = 'A guarded escape is already active'
             return response
         try:
+            if not self.start_sensor_streams():
+                response.success = False
+                response.message = 'Guarded arc refused: sensors did not become ready'
+                return response
             return self.run_arc(
                 response,
                 turn_direction=turn_direction,
@@ -684,6 +733,7 @@ class GuardedReverse(Node):
             for _ in range(5):
                 self.publish_stop()
                 time.sleep(0.05)
+            self.stop_sensor_streams()
             self.operation_lock.release()
 
     def run_straight(self, response, *, motion_direction):
@@ -942,7 +992,10 @@ class GuardedReverse(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = GuardedReverse()
-    executor = MultiThreadedExecutor(num_threads=3)
+    # One worker runs a bounded recovery service while the other keeps scan
+    # and odometry fresh. A third idle Python worker only adds scheduler load
+    # on the four-core ODROID and is not needed for correctness.
+    executor = MultiThreadedExecutor(num_threads=2)
     executor.add_node(node)
     try:
         executor.spin()

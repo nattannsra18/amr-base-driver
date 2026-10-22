@@ -162,20 +162,24 @@ def aborted_goal_ids(message: GoalStatusArray) -> list[str]:
 
 
 class BlackBoxRecorder(Node):
-    """Record the last minute of compact robot state without rosbag overhead."""
+    """Record five minutes of compact robot state without rosbag overhead."""
 
-    def __init__(self):
-        super().__init__('black_box_recorder')
+    def __init__(self, *, parameter_overrides=None):
+        super().__init__(
+            'black_box_recorder', parameter_overrides=parameter_overrides)
         default_directory = os.environ.get(
             'AMR_BLACK_BOX_DIR',
             '~/.local/state/indoor-delivery-robot/black-box',
         )
         self.declare_parameter('directory', default_directory)
-        self.declare_parameter('retention_seconds', 60.0)
+        self.declare_parameter('retention_seconds', 300.0)
         self.declare_parameter('segment_seconds', 10.0)
         self.declare_parameter('max_topic_hz', 5.0)
         self.declare_parameter('plan_max_poses', 64)
         self.declare_parameter('scan_topic', '/scan_recovery')
+        self.declare_parameter('record_scan', True)
+        self.declare_parameter('record_tf', True)
+        self.declare_parameter('record_extended_navigation', True)
         self.declare_parameter(
             'incident_directory',
             str(Path(default_directory).expanduser().parent / 'incidents'),
@@ -212,35 +216,47 @@ class BlackBoxRecorder(Node):
             lambda message: self.record_odometry('/odometry/filtered', message),
             qos_profile_sensor_data,
         )
-        self.create_subscription(
-            PoseWithCovarianceStamped, '/amcl_pose', self.record_amcl,
-            qos_profile_sensor_data)
-        self.create_subscription(
-            LaserScan, str(self.get_parameter('scan_topic').value),
-            self.record_scan, qos_profile_sensor_data)
-        self.create_subscription(
-            NavPath, '/plan', self.record_plan, 10)
-        self.create_subscription(
-            GoalStatusArray, '/navigate_to_pose/_action/status',
-            self.record_navigation_status, 10)
+        record_extended_navigation = bool(
+            self.get_parameter('record_extended_navigation').value)
+        if record_extended_navigation:
+            self.create_subscription(
+                PoseWithCovarianceStamped, '/amcl_pose', self.record_amcl,
+                qos_profile_sensor_data)
+        # Raw scan and TF subscriptions are useful for deep perception
+        # captures, but deserializing every high-rate message costs roughly one
+        # ODROID core even when JSONL writes are throttled.  The production
+        # service disables these streams and retains their health/clearance
+        # summaries through /diagnostics; they remain opt-in for focused HIL.
+        if bool(self.get_parameter('record_scan').value):
+            self.create_subscription(
+                LaserScan, str(self.get_parameter('scan_topic').value),
+                self.record_scan, qos_profile_sensor_data)
+        if record_extended_navigation:
+            self.create_subscription(
+                NavPath, '/plan', self.record_plan, 10)
+            self.create_subscription(
+                GoalStatusArray, '/navigate_to_pose/_action/status',
+                self.record_navigation_status, 10)
         self.create_subscription(
             String, '/navigation_events', self.record_navigation_event, 10)
         self.create_subscription(
             DiagnosticArray, '/diagnostics', self.record_diagnostics, 10)
-        self.create_subscription(
-            TFMessage, '/tf', self.record_tf, qos_profile_sensor_data)
-        for node_name in (
-            'map_server', 'amcl', 'controller_server', 'planner_server',
-            'velocity_smoother', 'collision_monitor',
-            'behavior_server', 'bt_navigator',
-        ):
+        if bool(self.get_parameter('record_tf').value):
             self.create_subscription(
-                TransitionEvent,
-                f'/{node_name}/transition_event',
-                lambda message, name=node_name: self.record_lifecycle(
-                    name, message),
-                10,
-            )
+                TFMessage, '/tf', self.record_tf, qos_profile_sensor_data)
+        if record_extended_navigation:
+            for node_name in (
+                'map_server', 'amcl', 'controller_server', 'planner_server',
+                'velocity_smoother', 'collision_monitor',
+                'behavior_server', 'bt_navigator',
+            ):
+                self.create_subscription(
+                    TransitionEvent,
+                    f'/{node_name}/transition_event',
+                    lambda message, name=node_name: self.record_lifecycle(
+                        name, message),
+                    10,
+                )
         self.create_service(Trigger, '/black_box/mark', self.mark)
         self.diagnostics = self.create_publisher(
             DiagnosticArray, '/diagnostics', 10)
@@ -349,10 +365,23 @@ class BlackBoxRecorder(Node):
         except (TypeError, ValueError):
             event = {'event': 'invalid_navigation_event', 'raw': message.data}
         self.record('/navigation_events', event, force=True)
-        if event.get('event') in {
+        event_name = str(event.get('event', ''))
+        if event_name in {
             'navigation_aborted', 'blocked_pose_recovery_started'
         }:
-            self.archive_incident(str(event['event']), event)
+            self.archive_incident(event_name, event)
+        elif event_name == 'navigation_succeeded':
+            parts = (event_name, event.get('task_id'), event.get('stage'))
+            label = '-'.join(
+                ''.join(
+                    character if character.isalnum() or character in '-_'
+                    else '-'
+                    for character in str(part)
+                )
+                for part in parts
+                if part
+            )
+            self.archive_incident(label, event)
 
     def record_diagnostics(self, message):
         # /diagnostics has several independent publishers. Throttling all of
@@ -360,21 +389,24 @@ class BlackBoxRecorder(Node):
         # command ownership (or the reverse).
         names = sorted(status.name for status in message.status)
         stream = '/diagnostics/' + '|'.join(names)
+        important = any(
+            diagnostic_level(status.level) >= diagnostic_level(
+                DiagnosticStatus.WARN)
+            for status in message.status
+        )
+        if not important and not self.should_record(stream):
+            return
+
         statuses = []
-        important = False
         for status in message.status:
             values = {value.key: value.value for value in status.values}
             level = diagnostic_level(status.level)
-            important = important or level >= diagnostic_level(
-                DiagnosticStatus.WARN)
             statuses.append({
                 'name': status.name,
                 'level': level,
                 'message': status.message,
                 'values': values,
             })
-        if not important and not self.should_record(stream):
-            return
         self.record(stream, {
             'age_ms': header_age_ms(self, message.header),
             'statuses': statuses,

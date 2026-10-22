@@ -7,6 +7,7 @@ readonly BASE_SERVICE_NAME="indoor-delivery-robot-base.service"
 readonly BLACK_BOX_SERVICE_NAME="indoor-delivery-robot-black-box.service"
 readonly CRITICAL_SLICE_NAME="indoor-delivery-robot-critical.slice"
 readonly BACKGROUND_SLICE_NAME="indoor-delivery-robot-background.slice"
+readonly NEEDRESTART_CONFIG_NAME="99-indoor-delivery-robot.conf"
 readonly CONFIG_DIR="/etc/indoor-delivery-robot"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,6 +67,7 @@ done
 [[ -f "$REPOSITORY_ROOT/deploy/systemd/$BLACK_BOX_SERVICE_NAME" ]] || fail "Black-box service template was not found"
 [[ -f "$REPOSITORY_ROOT/deploy/systemd/$CRITICAL_SLICE_NAME" ]] || fail "Critical slice template was not found"
 [[ -f "$REPOSITORY_ROOT/deploy/systemd/$BACKGROUND_SLICE_NAME" ]] || fail "Background slice template was not found"
+[[ -f "$REPOSITORY_ROOT/deploy/needrestart/$NEEDRESTART_CONFIG_NAME" ]] || fail "needrestart policy was not found"
 [[ "$EUID" -eq 0 || "$DRY_RUN" == true ]] || fail "Run this installer with sudo, or use --dry-run"
 
 WORKSPACE="$(readlink -f -- "$WORKSPACE")"
@@ -82,7 +84,10 @@ trap cleanup EXIT
   printf 'AMR_WORKSPACE=%s\n' "$WORKSPACE"
   printf 'AMR_ACTIVE_MAP_LINK=%s/maps/.active-map.yaml\n' "$WORKSPACE"
   printf 'AMR_ENABLE_MOTORS=%s\n' "$ENABLE_MOTORS"
-  printf 'AMR_NAV2_USE_COMPOSITION=true\n'
+  # Separate Nav2 processes are required on this ODROID/Fast DDS image. The
+  # composed container can report active lifecycle nodes while exposing no
+  # usable action server to the Robot Agent.
+  printf 'AMR_NAV2_USE_COMPOSITION=false\n'
   printf 'AMR_SOURCE_COMMIT=%s\n' "$SOURCE_COMMIT"
   # Keep every robot-side ROS process on the same transport. The Agent runs as
   # a separate service account, so UDP avoids Fast DDS shared-memory permission
@@ -122,6 +127,13 @@ run install -o root -g root -m 0644 \
 run install -o root -g root -m 0644 \
   "$REPOSITORY_ROOT/deploy/systemd/$BACKGROUND_SLICE_NAME" \
   "/etc/systemd/system/$BACKGROUND_SLICE_NAME"
+if [[ -d /etc/needrestart/conf.d ]]; then
+  # Package maintenance may update shared libraries, but restarting the
+  # motion stack behind the operator's back clears AMCL and interrupts tasks.
+  run install -o root -g root -m 0644 \
+    "$REPOSITORY_ROOT/deploy/needrestart/$NEEDRESTART_CONFIG_NAME" \
+    "/etc/needrestart/conf.d/$NEEDRESTART_CONFIG_NAME"
+fi
 run systemctl daemon-reload
 
 # navigation.launch.py owns the LiDAR driver. A separate legacy unit would
@@ -131,9 +143,9 @@ if systemctl list-unit-files --type=service | grep -q '^ydlidar-x3.service'; the
 fi
 
 run systemctl enable "$BASE_SERVICE_NAME" "$SERVICE_NAME"
-# The recorder remains installed for incident capture, but normal navigation
-# must not spend CPU and DDS bandwidth on it unless an operator starts it.
-run systemctl disable "$BLACK_BOX_SERVICE_NAME"
+# Incident recording is deliberately on-demand on the four-core ODROID. Use
+# `systemctl start` for a focused capture; never leave it enabled across boots.
+run systemctl disable --now "$BLACK_BOX_SERVICE_NAME"
 if [[ -n "$MAP_FILE" ]]; then
   run /usr/local/sbin/indoor-delivery-robot-control select-map "$MAP_FILE"
 fi

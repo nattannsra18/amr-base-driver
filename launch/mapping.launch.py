@@ -27,6 +27,8 @@ def generate_launch_description():
         name='ydlidar_ros2_driver_node',
         output='screen',
         emulate_tty=True,
+        respawn=True,
+        respawn_delay=5.0,
         parameters=[os.path.join(base_share, 'config', 'ydlidar_x3.yaml')],
         remappings=[('scan', '/scan_raw')],
     )

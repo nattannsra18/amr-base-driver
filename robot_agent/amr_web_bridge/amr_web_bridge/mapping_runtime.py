@@ -11,6 +11,11 @@ from threading import Lock
 import time
 from typing import Any, Callable
 
+from amr_base_driver.lifecycle_interlock import (
+    DEFAULT_LIFECYCLE_LOCK,
+    LifecycleInterlock,
+)
+
 from .map_catalog import available_map_yaml, MAP_ID_PATTERN, update_map_metadata
 
 
@@ -27,6 +32,11 @@ class MappingRuntime:
         sleep: Callable[[float], None] = time.sleep,
         lifecycle_state: Callable[[str], bool] | None = None,
         lifecycle_command: Callable[[str, int], None] | None = None,
+        mapping_active_marker: str = (
+            '/var/lib/indoor-delivery-robot/mapping-active'
+        ),
+        lifecycle_lock_path: str | None = None,
+        clear_stale_marker: bool = False,
     ) -> None:
         self.maps_directory = maps_directory
         self.slam_params_file = slam_params_file
@@ -35,6 +45,21 @@ class MappingRuntime:
         self._sleep = sleep
         self._lifecycle_state = lifecycle_state
         self._lifecycle_command = lifecycle_command
+        self._mapping_active_marker = Path(mapping_active_marker)
+        if lifecycle_lock_path is None:
+            if str(self._mapping_active_marker) == (
+                '/var/lib/indoor-delivery-robot/mapping-active'
+            ):
+                lifecycle_lock_path = DEFAULT_LIFECYCLE_LOCK
+            else:
+                # Isolated tests and non-production instances keep all state
+                # beside their caller-supplied marker.
+                lifecycle_lock_path = str(
+                    self._mapping_active_marker.with_name(
+                        'navigation-lifecycle.lock'
+                    )
+                )
+        self._lifecycle_interlock = LifecycleInterlock(lifecycle_lock_path)
         self._lock = Lock()
         self._process: subprocess.Popen[Any] | None = None
         self._session_id: str | None = None
@@ -45,6 +70,20 @@ class MappingRuntime:
         self._start_map_revision: int | None = None
         self._navigation_was_active = False
         self._localization_was_active = False
+        if clear_stale_marker:
+            # A service restart terminates the SLAM child process, so any
+            # marker left by the previous Agent instance is stale.
+            self._clear_mapping_active()
+
+    def _mark_mapping_active(self) -> None:
+        self._mapping_active_marker.parent.mkdir(parents=True, exist_ok=True)
+        self._mapping_active_marker.write_text(
+            f'{self._session_id or "mapping"}\n',
+            encoding='utf-8',
+        )
+
+    def _clear_mapping_active(self) -> None:
+        self._mapping_active_marker.unlink(missing_ok=True)
 
     def snapshot(self, map_revision: int) -> dict[str, Any]:
         with self._lock:
@@ -131,13 +170,14 @@ class MappingRuntime:
         manager: str,
         node: str,
         *,
+        command: int = 2,
         attempts: int = 3,
     ) -> None:
         """Start a lifecycle manager, tolerating a lost service response."""
         last_error: Exception | None = None
         for attempt in range(attempts):
             try:
-                self._lifecycle(manager, 2)
+                self._lifecycle(manager, command)
                 return
             except Exception as error:
                 last_error = error
@@ -150,6 +190,36 @@ class MappingRuntime:
                     self._sleep(1.0)
         raise RuntimeError(
             f'{manager} failed to restore {node} after {attempts} attempts: '
+            f'{last_error}'
+        ) from last_error
+
+    def _ensure_lifecycle_reset(
+        self,
+        manager: str,
+        node: str,
+        *,
+        attempts: int = 3,
+    ) -> None:
+        """Reset managed nodes so stale costmap observations cannot survive."""
+        last_error: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                # ManageLifecycleNodes RESET = 3. Unlike PAUSE/RESUME this
+                # destroys and recreates costmap subscriptions and their
+                # observation buffers.
+                self._lifecycle(manager, 3)
+                return
+            except Exception as error:
+                last_error = error
+                try:
+                    if not self._lifecycle_node_active(node):
+                        return
+                except Exception as state_error:
+                    last_error = state_error
+                if attempt + 1 < attempts:
+                    self._sleep(1.0)
+        raise RuntimeError(
+            f'{manager} failed to reset {node} after {attempts} attempts: '
             f'{last_error}'
         ) from last_error
 
@@ -170,6 +240,19 @@ class MappingRuntime:
         navigation_paused = False
         localization_paused = False
         try:
+            # Block the readiness-driven Nav2 launch gates before inspecting
+            # lifecycle state. Without this inter-process marker a stack that
+            # is still starting can create and activate Nav2 after this method
+            # has already decided navigation is inactive.
+            self._mark_mapping_active()
+            self._set(
+                'STARTING',
+                'Waiting for exclusive Nav2 lifecycle ownership',
+            )
+            if not self._lifecycle_interlock.acquire(timeout_seconds=30.0):
+                raise RuntimeError(
+                    'Nav2 lifecycle transition is still busy after 30s'
+                )
             navigation_active, localization_active = (
                 self._active_lifecycle_nodes()
             )
@@ -192,6 +275,9 @@ class MappingRuntime:
                 # That backlog can make the live map appear warped even when
                 # the final saved graph is optimized correctly.
                 'ros2', 'launch', 'slam_toolbox', 'online_sync_launch.py',
+                # Configure and activate inside this launch process. This is
+                # deterministic and does not depend on the long-running
+                # Agent discovering services from a node created afterward.
                 'use_sim_time:=false', 'autostart:=true',
             ]
             if self.slam_params_file:
@@ -212,10 +298,13 @@ class MappingRuntime:
                 self._phase = 'MAPPING'
                 self._detail = 'SLAM Toolbox is building a live occupancy map'
         except Exception as error:
+            self._stop_slam_process()
+            self._clear_mapping_active()
             if localization_paused:
                 self._safe_lifecycle('lifecycle_manager_localization', 2)
             if navigation_paused:
                 self._safe_lifecycle('lifecycle_manager_navigation', 2)
+            self._lifecycle_interlock.release()
             with self._lock:
                 self._localization_was_active = False
                 self._navigation_was_active = False
@@ -284,6 +373,8 @@ class MappingRuntime:
             else:
                 self._stop_slam_process()
                 activate_saved_map(yaml_path)
+                self._clear_mapping_active()
+                self._lifecycle_interlock.release()
                 with self._lock:
                     self._localization_was_active = False
                     self._navigation_was_active = False
@@ -404,6 +495,11 @@ class MappingRuntime:
             localization_was_active,
             navigation_was_active,
         )
+        # Keep both intent marker and advisory lease until restoration is
+        # complete.  Clearing either earlier lets the readiness gate race the
+        # explicit lifecycle-manager calls above.
+        self._clear_mapping_active()
+        self._lifecycle_interlock.release()
 
     def _stop_slam_process(self) -> None:
         with self._lock:
@@ -430,8 +526,16 @@ class MappingRuntime:
             with self._lock:
                 self._localization_was_active = False
         if navigation_was_active:
-            self._ensure_lifecycle_started(
+            # PAUSE/RESUME preserves the costmap observation buffers. During a
+            # long SLAM session those buffers retain scan timestamps older than
+            # the rebuilt TF cache, causing planner activation to wait forever
+            # for an impossible historical transform. Reset then start Nav2 so
+            # every costmap begins with fresh post-mapping observations.
+            self._ensure_lifecycle_reset(
                 'lifecycle_manager_navigation', 'planner_server',
+            )
+            self._ensure_lifecycle_started(
+                'lifecycle_manager_navigation', 'planner_server', command=0,
             )
             with self._lock:
                 self._navigation_was_active = False

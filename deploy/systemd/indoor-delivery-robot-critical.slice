@@ -3,5 +3,4 @@ Description=Indoor Delivery Robot Critical Control Workload
 
 [Slice]
 CPUWeight=1000
-AllowedCPUs=3
-
+AllowedCPUs=2-3

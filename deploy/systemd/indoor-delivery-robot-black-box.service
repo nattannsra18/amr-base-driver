@@ -3,7 +3,6 @@ Description=Indoor Delivery Robot Rolling Incident Recorder
 Documentation=https://github.com/nattannsra18/amr-base-driver
 After=indoor-delivery-robot-base.service
 Wants=indoor-delivery-robot-base.service
-PartOf=indoor-delivery-robot-navigation.service
 StartLimitIntervalSec=120
 StartLimitBurst=5
 
@@ -14,7 +13,7 @@ User=odroid
 Group=odroid
 WorkingDirectory=/home/odroid/amr_ws
 EnvironmentFile=/etc/indoor-delivery-robot/navigation.env
-ExecStart=/usr/bin/bash -lc 'source "/opt/ros/$ROS_DISTRO/setup.bash" && source "$AMR_WORKSPACE/install/setup.bash" && exec ros2 run amr_base_driver black_box_recorder --ros-args -p max_topic_hz:=1.0'
+ExecStart=/usr/bin/bash -lc 'source "/opt/ros/$ROS_DISTRO/setup.bash" && source "$AMR_WORKSPACE/install/setup.bash" && exec ros2 run amr_base_driver black_box_recorder --ros-args -p retention_seconds:=300.0 -p max_topic_hz:=1.0 -p record_scan:=false -p record_tf:=false -p record_extended_navigation:=false'
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10

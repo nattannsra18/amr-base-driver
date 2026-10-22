@@ -28,6 +28,7 @@ CAMERA_FRAME_HEADER = struct.Struct('!4sBQQQ')
 # Three frames cover the measured Wi-Fi RTT at 30 FPS while bounding wire
 # backlog to roughly 100 ms during a brief network stall.
 CAMERA_MAX_IN_FLIGHT = 3
+CAMERA_ACK_TIMEOUT_SECONDS = 8.0
 
 
 @dataclass(frozen=True)
@@ -50,16 +51,21 @@ def pack_camera_frame(frame: CapturedJpeg, sent_at_ns: int) -> bytes:
     ) + frame.data
 
 
-def camera_frame_acknowledged(message: object, sequence: int) -> bool:
-    """Validate the one-frame-in-flight acknowledgement from FastAPI."""
+def camera_frame_ack_sequence(message: object) -> int | None:
+    """Return a valid FastAPI camera acknowledgement sequence."""
     try:
         payload = json.loads(str(message))
     except (TypeError, ValueError):
-        return False
-    return (
-        payload.get('type') == 'camera_frame_ack'
-        and payload.get('source_sequence') == sequence
-    )
+        return None
+    sequence = payload.get('source_sequence')
+    if payload.get('type') != 'camera_frame_ack':
+        return None
+    return sequence if isinstance(sequence, int) and sequence >= 0 else None
+
+
+def camera_frame_acknowledged(message: object, sequence: int) -> bool:
+    """Validate a camera acknowledgement from FastAPI."""
+    return camera_frame_ack_sequence(message) == sequence
 
 
 def camera_stream_requested(message: object) -> bool | None:
@@ -297,7 +303,7 @@ class CameraRelay:
                         continue
                     acknowledgement = await asyncio.wait_for(
                         websocket.recv(),
-                        timeout=3.0,
+                        timeout=CAMERA_ACK_TIMEOUT_SECONDS,
                     )
                     demand = camera_stream_requested(acknowledgement)
                     if demand is not None:
@@ -308,12 +314,20 @@ class CameraRelay:
                             while not frames.empty():
                                 frames.get_nowait()
                         continue
-                    if not camera_frame_acknowledged(
-                        acknowledgement,
-                        pending_sequences[0],
-                    ):
+                    acknowledged_sequence = camera_frame_ack_sequence(
+                        acknowledgement
+                    )
+                    if acknowledged_sequence is None:
                         raise OSError('invalid camera frame acknowledgement')
-                    pending_sequences.popleft()
+                    # A demand update can overtake an ACK after its pending
+                    # window is cleared. Ignore that stale ACK, and treat a
+                    # newer ACK as cumulative because WebSocket delivery is
+                    # ordered.
+                    while (
+                        pending_sequences
+                        and pending_sequences[0] <= acknowledged_sequence
+                    ):
+                        pending_sequences.popleft()
             finally:
                 self.source.set_frame_callback(None)
 

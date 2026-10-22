@@ -1,4 +1,5 @@
 import math
+import statistics
 import time
 
 from diagnostic_msgs.msg import DiagnosticArray
@@ -6,6 +7,7 @@ from geometry_msgs.msg import Twist
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Imu, JointState
 from std_srvs.srv import Empty
 
@@ -36,6 +38,10 @@ class CalibrationRun(Node):
         self.declare_parameter('angular_speed', 0.35)
         self.declare_parameter('arc_linear_speed', 0.05)
         self.declare_parameter('arc_angular_speed', 0.28)
+        self.declare_parameter('target_wheel_rpm', 15.0)
+        self.declare_parameter('wheel_sample_duration', 2.5)
+        self.declare_parameter('wheel_radius', 0.032085)
+        self.declare_parameter('wheel_separation', 0.36094)
         self.declare_parameter('max_duration', 8.0)
         self.declare_parameter('distance_stop_margin', 0.0)
         self.declare_parameter('angle_stop_margin', 0.0)
@@ -51,6 +57,14 @@ class CalibrationRun(Node):
             self.get_parameter('arc_linear_speed').value)
         self.arc_angular_speed = float(
             self.get_parameter('arc_angular_speed').value)
+        self.target_wheel_rpm = float(
+            self.get_parameter('target_wheel_rpm').value)
+        self.wheel_sample_duration = float(
+            self.get_parameter('wheel_sample_duration').value)
+        self.wheel_radius = float(
+            self.get_parameter('wheel_radius').value)
+        self.wheel_separation = float(
+            self.get_parameter('wheel_separation').value)
         self.max_duration = float(
             self.get_parameter('max_duration').value)
         self.distance_stop_margin = float(
@@ -61,8 +75,10 @@ class CalibrationRun(Node):
         self.command_pub = self.create_publisher(
             Twist, '/cmd_vel_manual', 10)
         self.create_subscription(
-            Odometry, '/wheel/odometry', self.on_odom, 20)
-        self.create_subscription(Imu, '/imu/data_raw', self.on_imu, 20)
+            Odometry, '/wheel/odometry', self.on_odom,
+            qos_profile_sensor_data)
+        self.create_subscription(
+            Imu, '/imu/data_raw', self.on_imu, qos_profile_sensor_data)
         self.create_subscription(
             JointState, '/joint_states', self.on_joint_state, 20)
         self.create_subscription(
@@ -79,6 +95,8 @@ class CalibrationRun(Node):
         self.joint_positions = None
         self.motors_enabled = False
         self.diagnostic_time = 0.0
+        self.collect_wheel_samples = False
+        self.wheel_samples = []
 
     def on_odom(self, message):
         self.odom = message
@@ -118,7 +136,37 @@ class CalibrationRun(Node):
                     self.fault = -1
             if 'motors_enabled' in values:
                 self.motors_enabled = values['motors_enabled'] == 'True'
+            if (
+                status.name == 'Base drive telemetry'
+                and self.collect_wheel_samples
+            ):
+                try:
+                    self.wheel_samples.append((
+                        float(values['target_left_rpm']),
+                        float(values['target_right_rpm']),
+                        float(values['measured_left_rpm']),
+                        float(values['measured_right_rpm']),
+                    ))
+                except (KeyError, TypeError, ValueError):
+                    pass
             self.diagnostic_time = time.monotonic()
+
+    @staticmethod
+    def independent_wheel_twist(
+        side, target_rpm, wheel_radius, wheel_separation,
+    ):
+        """Convert a one-wheel RPM request into differential-drive twist."""
+        if side not in {'left', 'right'}:
+            raise ValueError(f'unsupported wheel side: {side}')
+        if wheel_radius <= 0.0 or wheel_separation <= 0.0:
+            raise ValueError('wheel geometry must be positive')
+        wheel_speed = (
+            float(target_rpm) * 2.0 * math.pi * wheel_radius / 60.0
+        )
+        angular = wheel_speed / wheel_separation
+        if side == 'left':
+            angular = -angular
+        return wheel_speed / 2.0, angular
 
     def publish_command(self, linear=0.0, angular=0.0):
         message = Twist()
@@ -178,7 +226,7 @@ class CalibrationRun(Node):
     def run(self):
         if self.mode not in (
             'straight', 'reverse', 'turn_left', 'turn_right',
-            'arc_left', 'arc_right',
+            'arc_left', 'arc_right', 'left_wheel', 'right_wheel',
         ):
             print(f'ABORT invalid mode: {self.mode}', flush=True)
             return 2
@@ -209,6 +257,10 @@ class CalibrationRun(Node):
         self.imu_angle = 0.0
         self.last_imu_time = start
         self.imu_collecting = True
+        self.collect_wheel_samples = self.mode in {
+            'left_wheel', 'right_wheel'
+        }
+        self.wheel_samples = []
         start_joints = self.joint_positions
         reason = 'timeout'
 
@@ -235,7 +287,19 @@ class CalibrationRun(Node):
             last_yaw = current_yaw
 
             now = time.monotonic()
-            if self.mode in {'straight', 'reverse'}:
+            if self.mode in {'left_wheel', 'right_wheel'}:
+                side = self.mode.removesuffix('_wheel')
+                linear, angular = self.independent_wheel_twist(
+                    side,
+                    self.target_wheel_rpm,
+                    self.wheel_radius,
+                    self.wheel_separation,
+                )
+                self.publish_command(linear=linear, angular=angular)
+                if now - start >= self.wheel_sample_duration:
+                    reason = 'target reached'
+                    break
+            elif self.mode in {'straight', 'reverse'}:
                 direction = 1.0 if self.mode == 'straight' else -1.0
                 self.publish_command(linear=direction * abs(self.linear_speed))
                 if distance >= max(
@@ -271,6 +335,7 @@ class CalibrationRun(Node):
             time.sleep(0.02)
 
         self.stop()
+        self.collect_wheel_samples = False
         self.imu_collecting = False
         coast_end = time.monotonic() + 1.0
         while rclpy.ok() and time.monotonic() < coast_end:
@@ -287,6 +352,18 @@ class CalibrationRun(Node):
             f'right_delta={right_delta:+.4f}rad signs_ok={signs_ok} '
             f'elapsed={time.monotonic() - start:.2f}s fault={self.fault}',
             flush=True)
+        if self.wheel_samples:
+            columns = list(zip(*self.wheel_samples))
+            medians = [statistics.median(column) for column in columns]
+            print(
+                'WHEEL_SAMPLE '
+                f'count={len(self.wheel_samples)} '
+                f'target_left_rpm={medians[0]:+.3f} '
+                f'target_right_rpm={medians[1]:+.3f} '
+                f'measured_left_rpm={medians[2]:+.3f} '
+                f'measured_right_rpm={medians[3]:+.3f}',
+                flush=True,
+            )
         if reason != 'target reached':
             return 5
         return 0 if signs_ok else 6
@@ -310,6 +387,18 @@ class CalibrationRun(Node):
             )
         if self.mode == 'turn_left':
             return left_delta < -threshold and right_delta > threshold
+        if self.mode == 'left_wheel':
+            return (
+                left_delta > threshold
+                if self.target_wheel_rpm > 0.0
+                else left_delta < -threshold
+            )
+        if self.mode == 'right_wheel':
+            return (
+                right_delta > threshold
+                if self.target_wheel_rpm > 0.0
+                else right_delta < -threshold
+            )
         return left_delta > threshold and right_delta < -threshold
 
 

@@ -7,6 +7,7 @@ import struct
 
 import amr_web_bridge.camera_relay as camera_relay_module
 from amr_web_bridge.camera_relay import (
+    camera_frame_ack_sequence,
     camera_frame_acknowledged,
     CAMERA_FRAME_HEADER,
     CAMERA_FRAME_MAGIC,
@@ -104,6 +105,12 @@ def test_camera_frame_ack_must_match_the_one_frame_in_flight():
         9,
     )
     assert not camera_frame_acknowledged('not-json', 9)
+    assert camera_frame_ack_sequence(
+        '{"type":"camera_frame_ack","source_sequence":10}'
+    ) == 10
+    assert camera_frame_ack_sequence(
+        '{"type":"camera_frame_ack","source_sequence":"10"}'
+    ) is None
 
 
 def test_camera_demand_messages_control_local_capture():

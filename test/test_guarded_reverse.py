@@ -1,4 +1,7 @@
 import math
+from pathlib import Path
+import threading
+from types import SimpleNamespace
 
 from amr_base_driver.guarded_reverse import (
     DEFAULT_ARC_DISTANCE,
@@ -15,7 +18,57 @@ from amr_base_driver.guarded_reverse import (
     robust_turn_side_clearance,
     swept_arc_obstacle_distance,
     swept_straight_obstacle_distance,
+    GuardedReverse,
 )
+
+
+def test_guarded_recovery_uses_two_executor_workers():
+    source = (
+        Path(__file__).resolve().parents[1] /
+        'amr_base_driver' / 'guarded_reverse.py'
+    ).read_text(encoding='utf-8')
+
+    assert 'MultiThreadedExecutor(num_threads=2)' in source
+    assert 'MultiThreadedExecutor(num_threads=3)' not in source
+
+
+def test_guarded_recovery_sensor_streams_are_lazy(monkeypatch):
+    subscriptions = []
+    destroyed = []
+    gate = SimpleNamespace(
+        data_lock=threading.Lock(),
+        latest_scan_geometry=None,
+        scan_monotonic=0.0,
+        latest_odom=None,
+        latest_yaw=None,
+        odom_monotonic=0.0,
+        sensor_warmup_timeout=0.5,
+        callbacks=object(),
+        scan_callback=object(),
+        odom_callback=object(),
+        get_parameter=lambda name: SimpleNamespace(
+            value='/scan' if name == 'scan_topic' else '/wheel/odometry'),
+        create_subscription=lambda *args, **kwargs: (
+            subscriptions.append((args, kwargs)) or object()),
+        destroy_subscription=lambda subscription: destroyed.append(subscription),
+    )
+
+    monotonic_values = iter([0.0, 0.1, 0.6])
+    monkeypatch.setattr(
+        'amr_base_driver.guarded_reverse.time.monotonic',
+        lambda: next(monotonic_values),
+    )
+    monkeypatch.setattr(
+        'amr_base_driver.guarded_reverse.time.sleep', lambda _seconds: None)
+
+    assert GuardedReverse.start_sensor_streams(gate) is False
+    assert len(subscriptions) == 2
+
+    GuardedReverse.stop_sensor_streams(gate)
+
+    assert len(destroyed) == 2
+    assert gate.scan_subscription is None
+    assert gate.odom_subscription is None
 
 
 def test_default_arc_distance_matches_rolling_pivot_geometry():

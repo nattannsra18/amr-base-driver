@@ -38,6 +38,8 @@ def generate_launch_description():
         name='ydlidar_ros2_driver_node',
         output='screen',
         emulate_tty=True,
+        respawn=True,
+        respawn_delay=5.0,
         parameters=[os.path.join(base_share, 'config', 'ydlidar_x3.yaml')],
         remappings=[('scan', '/scan_raw')],
     )
@@ -83,6 +85,7 @@ def generate_launch_description():
             # DDS discovery on the C4 is briefly CPU-bound during bring-up.
             # Keep lifecycle readiness authoritative without a fixed sleep.
             'bond_timeout': 10.0,
+            'bond_heartbeat_period': 0.5,
             'node_names': ['map_server', 'amcl'],
         }],
     )

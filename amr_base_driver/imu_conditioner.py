@@ -1,5 +1,4 @@
 """Correct residual MPU6050 bias only during confirmed stationary intervals."""
-import copy
 import math
 
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
@@ -57,7 +56,11 @@ class ImuConditioner(Node):
         bias = self.estimator.update(
             now, [g.x, g.y, g.z],
             math.sqrt(a.x*a.x+a.y*a.y+a.z*a.z), stationary)
-        out = copy.deepcopy(msg)
+        # rclpy gives this callback exclusive ownership of the received Python
+        # message.  Reuse it instead of recursively copying every IMU sample;
+        # this keeps the same published evidence while avoiding a costly
+        # allocation-heavy operation on the ODROID.
+        out = msg
         out.angular_velocity.x -= bias[0]
         out.angular_velocity.y -= bias[1]
         out.angular_velocity.z -= bias[2]

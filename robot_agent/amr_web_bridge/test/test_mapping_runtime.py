@@ -63,10 +63,13 @@ def test_mapping_runtime_transitions_and_saves_validated_map(tmp_path, monkeypat
         run=run,
         popen=popen,
         sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
     )
     runtime.start('mapping:robot01:abc')
+    assert (tmp_path / 'mapping-active').is_file()
     assert 'online_sync_launch.py' in launched[0]
     assert 'use_sim_time:=false' in launched[0]
+    assert 'autostart:=true' in launched[0]
     assert runtime.snapshot(2)['phase'] == 'MAPPING'
     runtime.stop_capture()
     assert runtime.snapshot(3)['phase'] == 'REVIEW'
@@ -77,15 +80,20 @@ def test_mapping_runtime_transitions_and_saves_validated_map(tmp_path, monkeypat
     assert snapshot['phase'] == 'IDLE'
     assert snapshot['saved_map_id'] == 'new_floor'
     assert (tmp_path / 'new_floor.metadata.json').is_file()
+    assert not (tmp_path / 'mapping-active').exists()
     assert sum(
         any(value.endswith('/manage_nodes') for value in command)
         for command in calls
-    ) == 4
+    ) == 5
 
 
 def test_mapping_runtime_rejects_existing_map(tmp_path):
     (tmp_path / 'used.pgm').write_bytes(b'P5\n1 1\n255\n\x00')
-    runtime = MappingRuntime(str(tmp_path), sleep=lambda _seconds: None)
+    runtime = MappingRuntime(
+        str(tmp_path),
+        sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
+    )
     runtime._phase = 'REVIEW'
     try:
         runtime.save('used', {'name': 'Used'})
@@ -103,7 +111,11 @@ def test_mapping_runtime_saves_exact_live_grid_and_activates_it(
     monkeypatch.setattr(
         'amr_web_bridge.mapping_runtime.os.killpg', lambda *_args: None,
     )
-    runtime = MappingRuntime(str(tmp_path), sleep=lambda _seconds: None)
+    runtime = MappingRuntime(
+        str(tmp_path),
+        sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
+    )
     runtime._phase = 'REVIEW'
     runtime._process = FakeProcess()
     runtime._start_map_revision = 7
@@ -138,7 +150,11 @@ def test_mapping_runtime_saves_exact_live_grid_and_activates_it(
 
 
 def test_mapping_runtime_rejects_stale_grid_from_before_session(tmp_path):
-    runtime = MappingRuntime(str(tmp_path), sleep=lambda _seconds: None)
+    runtime = MappingRuntime(
+        str(tmp_path),
+        sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
+    )
     runtime._phase = 'REVIEW'
     runtime._start_map_revision = 9
 
@@ -169,6 +185,7 @@ def test_mapping_runtime_preserves_start_failure_detail(tmp_path):
         str(tmp_path),
         run=run,
         sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
     )
     try:
         runtime.start('mapping:robot01:failed')
@@ -183,6 +200,7 @@ def test_mapping_runtime_preserves_start_failure_detail(tmp_path):
         'Unable to enter ROS mapping mode: '
         'localization lifecycle service timed out'
     )
+    assert not (tmp_path / 'mapping-active').exists()
 
 
 def test_mapping_runtime_uses_warm_lifecycle_callbacks(tmp_path, monkeypatch):
@@ -196,7 +214,10 @@ def test_mapping_runtime_uses_warm_lifecycle_callbacks(tmp_path, monkeypatch):
         states.append(node)
         return True
 
+    marker = tmp_path / 'mapping-active'
+
     def lifecycle_command(manager, command):
+        assert marker.is_file()
         transitions.append((manager, command))
 
     runtime = MappingRuntime(
@@ -208,6 +229,7 @@ def test_mapping_runtime_uses_warm_lifecycle_callbacks(tmp_path, monkeypatch):
         sleep=lambda _seconds: None,
         lifecycle_state=lifecycle_state,
         lifecycle_command=lifecycle_command,
+        mapping_active_marker=str(marker),
     )
 
     runtime.start('mapping:robot01:warm-clients')
@@ -220,8 +242,51 @@ def test_mapping_runtime_uses_warm_lifecycle_callbacks(tmp_path, monkeypatch):
     }
     assert transitions[2:] == [
         ('lifecycle_manager_localization', 2),
-        ('lifecycle_manager_navigation', 2),
+        ('lifecycle_manager_navigation', 3),
+        ('lifecycle_manager_navigation', 0),
     ]
+    assert not marker.exists()
+
+
+def test_saved_map_activation_keeps_mapping_interlock_until_complete(
+    tmp_path, monkeypatch,
+):
+    marker = tmp_path / 'mapping-active'
+    observed = []
+    monkeypatch.setattr(
+        'amr_web_bridge.mapping_runtime.os.killpg', lambda *_args: None,
+    )
+    runtime = MappingRuntime(
+        str(tmp_path),
+        sleep=lambda _seconds: None,
+        mapping_active_marker=str(marker),
+    )
+    runtime._phase = 'REVIEW'
+    runtime._process = FakeProcess()
+    runtime._start_map_revision = 1
+    runtime._session_id = 'mapping:robot01:save'
+    runtime._mark_mapping_active()
+    assert runtime._lifecycle_interlock.try_acquire() is True
+
+    def activate(path):
+        observed.append((path, marker.is_file(), runtime._lifecycle_interlock.held))
+
+    runtime.save(
+        'stable_map',
+        {'name': 'Stable map'},
+        {
+            'width': 1,
+            'height': 1,
+            'resolution': 0.05,
+            'data': [0],
+            'revision': 2,
+        },
+        activate,
+    )
+
+    assert observed == [(tmp_path / 'stable_map.yaml', True, True)]
+    assert marker.exists() is False
+    assert runtime._lifecycle_interlock.held is False
 
 
 def test_mapping_start_rolls_back_a_partial_lifecycle_pause(tmp_path):
@@ -237,6 +302,7 @@ def test_mapping_start_rolls_back_a_partial_lifecycle_pause(tmp_path):
         lifecycle_state=lambda _node: True,
         lifecycle_command=lifecycle_command,
         sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
     )
 
     try:
@@ -262,6 +328,7 @@ def test_mapping_runtime_limits_lifecycle_discovery_and_reports_timeout(tmp_path
         str(tmp_path),
         run=run,
         sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
     )
     started = time.monotonic()
     try:
@@ -306,6 +373,7 @@ def test_mapping_skips_navigation_when_waiting_for_initial_pose(
         run=run,
         popen=lambda *_args, **_kwargs: FakeProcess(),
         sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
     )
     runtime.start('mapping:robot01:no-initial-pose')
     runtime.discard()
@@ -341,7 +409,12 @@ def test_discard_accepts_lifecycle_started_after_lost_response(
     monkeypatch.setattr(
         'amr_web_bridge.mapping_runtime.os.killpg', lambda *_args: None,
     )
-    runtime = MappingRuntime(str(tmp_path), run=run, sleep=lambda _seconds: None)
+    runtime = MappingRuntime(
+        str(tmp_path),
+        run=run,
+        sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
+    )
     runtime._phase = 'FAILED'
     runtime._localization_was_active = True
     runtime.discard()
@@ -354,7 +427,12 @@ def test_discard_reports_restore_failure_and_remains_retryable(tmp_path):
     def run(_arguments, **_kwargs):
         raise RuntimeError('DDS service unavailable')
 
-    runtime = MappingRuntime(str(tmp_path), run=run, sleep=lambda _seconds: None)
+    runtime = MappingRuntime(
+        str(tmp_path),
+        run=run,
+        sleep=lambda _seconds: None,
+        mapping_active_marker=str(tmp_path / 'mapping-active'),
+    )
     runtime._phase = 'FAILED'
     runtime._localization_was_active = True
 

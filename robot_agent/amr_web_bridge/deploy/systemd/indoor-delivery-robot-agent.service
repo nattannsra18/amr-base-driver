@@ -27,7 +27,7 @@ NoNewPrivileges=false
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/indoor-delivery-robot /home/odroid/amr_ws/maps
+ReadWritePaths=/var/lib/indoor-delivery-robot /home/odroid/amr_ws/maps /run/lock
 
 [Install]
 WantedBy=multi-user.target

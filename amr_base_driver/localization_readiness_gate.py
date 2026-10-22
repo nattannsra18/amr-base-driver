@@ -1,5 +1,6 @@
 """Bring up localization before allowing the heavier Nav2 process group."""
 
+from pathlib import Path
 import time
 
 from lifecycle_msgs.msg import State
@@ -34,7 +35,15 @@ class LocalizationReadinessGate(Node):
         self.get_logger().info(
             'Waiting for map_server and AMCL lifecycle readiness')
 
+    @staticmethod
+    def mapping_active():
+        return Path(
+            '/var/lib/indoor-delivery-robot/mapping-active'
+        ).is_file()
+
     def check(self):
+        if self.mapping_active():
+            return
         if self.ready:
             self.get_logger().info(
                 'Localization is active; releasing Nav2 process startup')
@@ -104,6 +113,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        exit_code = 0 if node.ready else 1
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+    return exit_code

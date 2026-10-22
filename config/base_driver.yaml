@@ -11,11 +11,13 @@ amr_base_serial_bridge:
     # Corrects the stationary magnitude observed near 1.067 g.
     accel_scale: 0.9372
     max_rpm: 90.0
-    # Floor evidence shows the minimum PWM drives a 1-8 RPM request at
-    # 15-25 RPM. Stop that wheel instead so tight curves use a predictable
-    # one-wheel rolling turn rather than drifting almost straight.
-    minimum_trackable_rpm: 12.0
+    # Encoder trim is used only for near-straight motion. Curves keep the wheel
+    # ratio requested by Nav2 instead of applying independent RPM floors.
+    straight_trim_gain: 0.15
+    straight_trim_max_rpm: 3.0
     cmd_vel_timeout: 0.25
+    # Temporary attended test mode: leave telemetry and MCU safety active.
+    stall_guard_enabled: false
     # Stop both outputs when a trackable wheel command has no encoder motion.
     # A stop or direction reversal releases the guard for scan-checked recovery.
     stall_guard_min_target_rpm: 20.0

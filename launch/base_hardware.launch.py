@@ -31,7 +31,7 @@ def generate_launch_description():
             description='Start command arbitration and the ESP32 serial bridge.'),
         DeclareLaunchArgument(
             'enable_support', default_value='true',
-            description='Start EKF, conditioned IMU, recovery, and static TF nodes.'),
+            description='Start EKF, recovery, and static TF nodes.'),
         DeclareLaunchArgument(
             'enable_black_box', default_value='true',
             description=(
@@ -83,13 +83,6 @@ def generate_launch_description():
                     ekf_transform_time_offset, value_type=float)},
             ],
             remappings=[('odometry/filtered', '/odometry/filtered')],
-            condition=IfCondition(enable_support),
-        ),
-        Node(
-            package='amr_base_driver',
-            executable='imu_conditioner',
-            name='imu_conditioner',
-            output='screen',
             condition=IfCondition(enable_support),
         ),
         Node(

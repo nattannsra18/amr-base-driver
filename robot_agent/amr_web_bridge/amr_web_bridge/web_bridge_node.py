@@ -15,6 +15,7 @@ from typing import Any
 from uuid import uuid4
 
 from action_msgs.msg import GoalStatus
+from amr_base_driver.black_box_recorder import BlackBoxRecorder
 from ament_index_python.packages import get_package_share_directory
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseWithCovarianceStamped, Twist
@@ -25,7 +26,9 @@ from nav2_msgs.srv import ClearEntireCostmap, LoadMap, ManageLifecycleNodes
 from nav_msgs.msg import OccupancyGrid, Odometry, Path
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
+from rclpy.parameter import Parameter
 from rclpy.qos import (
     DurabilityPolicy,
     HistoryPolicy,
@@ -548,6 +551,7 @@ class WebBridgeNode(Node):
             slam_params_file=mapping_params_file,
             lifecycle_state=self.mapping_lifecycle_node_active,
             lifecycle_command=self.mapping_lifecycle_command,
+            clear_stale_marker=True,
         )
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -767,7 +771,7 @@ class WebBridgeNode(Node):
             10,
         )
         self.periodic_intervals = {
-            'work': 0.1,
+            'work': 0.2,
             'amcl': 1.0,
             'emergency_zero': 1.0 / self.emergency_stop_zero_rate,
             'physical_estop': 0.2,
@@ -1934,7 +1938,7 @@ class WebBridgeNode(Node):
                 websocket,
                 self.agent_readiness_snapshot(),
             )
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(3.0)
 
     async def heartbeat_loop(self, websocket: Any) -> None:
         while not self.stop_requested.is_set():
@@ -2076,7 +2080,9 @@ class WebBridgeNode(Node):
             if signature != sent_signature:
                 await self.send_json(websocket, status)
                 sent_signature = signature
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(
+                0.25 if status.get('phase') == 'MAPPING' else 1.0
+            )
 
     async def send_mapping_status(
         self,
@@ -2097,7 +2103,7 @@ class WebBridgeNode(Node):
     async def localization_status_loop(self, websocket: Any) -> None:
         while not self.stop_requested.is_set():
             await self.send_localization_status(websocket)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(2.0)
 
     async def send_localization_status(
         self,
@@ -2388,6 +2394,13 @@ class WebBridgeNode(Node):
                     or self.active_localization_command is not None
                 ):
                     raise ValueError('Navigation, route preview, or map switching is active')
+                with self.scan_lock:
+                    last_scan = self.last_scan_monotonic
+                if last_scan is None or time.monotonic() - last_scan > 1.0:
+                    raise ValueError(
+                        'Fresh LiDAR scan is unavailable; wait for the '
+                        'LiDAR driver to recover, then start mapping again'
+                    )
                 self.capture_mapping_pose_reference()
                 await asyncio.to_thread(
                     self.mapping_runtime.start,
@@ -2450,7 +2463,7 @@ class WebBridgeNode(Node):
             and not isinstance(angular_z, bool)
             and math.isfinite(float(linear_x))
             and math.isfinite(float(angular_z))
-            and abs(float(linear_x)) <= 0.22
+            and abs(float(linear_x)) <= 0.30
             and abs(float(angular_z)) <= 1.0
         )
         if not valid:
@@ -3610,8 +3623,20 @@ class WebBridgeNode(Node):
             client,
             GetState.Request(),
             timeout_seconds=4.0,
+            discovery_timeout_seconds=8.0,
         )
         if response is None:
+            if (
+                str(node).removeprefix('/') == 'planner_server'
+                and detail == 'service is unavailable'
+                and not self.navigation_lifecycle_client.service_is_ready()
+                and not self.navigation_client.server_is_ready()
+            ):
+                # The readiness-driven launch intentionally delays Nav2 until
+                # localization is ready. Mapping is safe to start while the
+                # entire navigation process group is genuinely absent; the
+                # mapping-active marker prevents it from racing us afterward.
+                return False
             raise RuntimeError(f'Unable to read {node} lifecycle state: {detail}')
         return int(response.current_state.id) == 3
 
@@ -3627,6 +3652,7 @@ class WebBridgeNode(Node):
             client,
             request,
             timeout_seconds=15.0,
+            discovery_timeout_seconds=8.0,
         )
         if response is None:
             raise RuntimeError(f'{manager} transition failed: {detail}')
@@ -6077,12 +6103,29 @@ class WebBridgeNode(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = WebBridgeNode()
+    recorder = BlackBoxRecorder(parameter_overrides=[
+        Parameter(
+            'directory', value='/var/lib/indoor-delivery-robot/black-box'),
+        Parameter(
+            'incident_directory',
+            value='/var/lib/indoor-delivery-robot/incidents'),
+        Parameter('retention_seconds', value=300.0),
+        Parameter('max_topic_hz', value=1.0),
+        Parameter('record_scan', value=False),
+        Parameter('record_tf', value=False),
+        Parameter('record_extended_navigation', value=False),
+    ])
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    executor.add_node(recorder)
 
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
+        executor.spin()
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
+        executor.shutdown()
+        recorder.destroy_node()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

@@ -2,7 +2,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction
+from launch.actions import DeclareLaunchArgument, GroupAction, LogInfo
 from launch.actions import IncludeLaunchDescription
 from launch.actions import RegisterEventHandler
 from launch.conditions import IfCondition, UnlessCondition
@@ -12,6 +12,18 @@ from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import ComposableNodeContainer, Node
 from launch_ros.descriptions import ComposableNode, ParameterFile
 from nav2_common.launch import RewrittenYaml
+
+
+def navigation_after_readiness_exit(event, navigation_processes):
+    """Release Nav2 only when the localization gate explicitly succeeded."""
+    if event.returncode == 0:
+        return [
+            LogInfo(msg='Localization readiness succeeded; starting Nav2'),
+            navigation_processes,
+        ]
+    return [LogInfo(msg=(
+        'ERROR: Localization readiness gate exited without success '
+        f'(code {event.returncode}); Nav2 remains stopped'))]
 
 
 def generate_launch_description():
@@ -127,6 +139,7 @@ def generate_launch_description():
             # recovery work is active. Keep detection bounded without tearing
             # down a healthy stack during one transient scheduler stall.
             'bond_timeout': 10.0,
+            'bond_heartbeat_period': 0.5,
             'node_names': [
                 'controller_server',
                 'planner_server',
@@ -222,6 +235,7 @@ def generate_launch_description():
                 parameters=[{
                     'autostart': False,
                     'bond_timeout': 10.0,
+                    'bond_heartbeat_period': 0.5,
                     'node_names': lifecycle_nodes,
                 }],
             ),
@@ -267,7 +281,8 @@ def generate_launch_description():
     start_navigation_when_localized = RegisterEventHandler(
         OnProcessExit(
             target_action=localization_ready,
-            on_exit=[navigation_processes],
+            on_exit=lambda event, _context: navigation_after_readiness_exit(
+                event, navigation_processes),
         )
     )
 

@@ -64,6 +64,26 @@ def test_navigation_abort_archives_each_goal_once():
     ]
 
 
+def test_navigation_success_archives_task_stage():
+    recorder = BlackBoxRecorder.__new__(BlackBoxRecorder)
+    recorded = []
+    archived = []
+    recorder.record = lambda stream, data, force=False: recorded.append(
+        (stream, data, force))
+    recorder.archive_incident = lambda label, marker: archived.append(
+        (label, marker))
+    event = {
+        'event': 'navigation_succeeded',
+        'task_id': 'TASK-309',
+        'stage': 'destination',
+    }
+
+    recorder.record_navigation_event(SimpleNamespace(data=json.dumps(event)))
+
+    assert recorded == [('/navigation_events', event, True)]
+    assert archived == [('navigation_succeeded-TASK-309-destination', event)]
+
+
 def test_diagnostic_fault_bypasses_continuous_stream_throttle():
     recorder = BlackBoxRecorder.__new__(BlackBoxRecorder)
     recorder.should_record = lambda _stream: False
@@ -86,6 +106,26 @@ def test_diagnostic_fault_bypasses_continuous_stream_throttle():
 
     assert recorded[0][0] == '/diagnostics/Base serial telemetry'
     assert recorded[0][2] is True
+
+
+def test_throttled_ok_diagnostics_skip_value_materialization():
+    recorder = BlackBoxRecorder.__new__(BlackBoxRecorder)
+    recorder.should_record = lambda _stream: False
+    recorder.record = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError('throttled diagnostics must not be written'))
+
+    class ValuesThatMustNotBeRead:
+        def __iter__(self):
+            raise AssertionError('diagnostic values were materialized')
+
+    message = SimpleNamespace(status=[SimpleNamespace(
+        name='Base drive telemetry',
+        level=0,
+        message='OK',
+        values=ValuesThatMustNotBeRead(),
+    )])
+
+    recorder.record_diagnostics(message)
 
 
 def test_rolling_writer_keeps_only_retention_segments(tmp_path):

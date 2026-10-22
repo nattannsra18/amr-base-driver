@@ -9,14 +9,19 @@ from amr_web_bridge.web_bridge_node import WebBridgeNode
 from lifecycle_msgs.msg import State
 
 
-def client(response, calls, name):
+def client(response, calls, name, waits=None):
     def call(_request):
         calls.append(name)
         future = Future()
         future.set_result(response)
         return future
 
-    return SimpleNamespace(wait_for_service=lambda **_kwargs: True, call_async=call)
+    def wait_for_service(*, timeout_sec):
+        if waits is not None:
+            waits.append(timeout_sec)
+        return True
+
+    return SimpleNamespace(wait_for_service=wait_for_service, call_async=call)
 
 
 def test_native_lifecycle_requires_active_numeric_state():
@@ -155,6 +160,44 @@ def test_mapping_lifecycle_state_uses_generic_get_state_response():
         'planner_server',
     )
     assert calls == ['planner']
+
+
+def test_mapping_treats_not_yet_launched_navigation_as_inactive():
+    unavailable = SimpleNamespace(
+        wait_for_service=lambda *, timeout_sec: False,
+    )
+    value = SimpleNamespace(
+        mapping_lifecycle_clients={'planner_server': unavailable},
+        navigation_lifecycle_client=SimpleNamespace(
+            service_is_ready=lambda: False,
+        ),
+        navigation_client=SimpleNamespace(server_is_ready=lambda: False),
+    )
+
+    assert not WebBridgeNode.mapping_lifecycle_node_active(
+        value,
+        'planner_server',
+    )
+
+
+def test_mapping_fails_closed_when_navigation_manager_is_discovered():
+    unavailable = SimpleNamespace(
+        wait_for_service=lambda *, timeout_sec: False,
+    )
+    value = SimpleNamespace(
+        mapping_lifecycle_clients={'planner_server': unavailable},
+        navigation_lifecycle_client=SimpleNamespace(
+            service_is_ready=lambda: True,
+        ),
+        navigation_client=SimpleNamespace(server_is_ready=lambda: False),
+    )
+
+    try:
+        WebBridgeNode.mapping_lifecycle_node_active(value, 'planner_server')
+    except RuntimeError as error:
+        assert 'planner_server lifecycle state' in str(error)
+    else:
+        raise AssertionError('discovered navigation manager was ignored')
 
 
 def test_mapping_lifecycle_command_uses_manage_nodes_response():
