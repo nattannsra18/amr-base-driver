@@ -25,7 +25,7 @@ def test_web_mapping_uses_detailed_physical_slam_profile():
     ]['ros__parameters']
 
     assert parameters['use_sim_time'] is False
-    assert parameters['resolution'] == 0.02
+    assert parameters['resolution'] == 0.03
     assert parameters['scan_queue_size'] == 10
     assert parameters['minimum_travel_distance'] == 0.05
     assert parameters['minimum_travel_heading'] == 0.05

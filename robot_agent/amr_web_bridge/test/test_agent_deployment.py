@@ -12,6 +12,7 @@ def test_systemd_service_starts_agent_from_external_profile_and_env():
         / 'indoor-delivery-robot-agent.service'
     ).read_text(encoding='utf-8')
     assert 'EnvironmentFile=/etc/indoor-delivery-robot/agent.env' in service
+    assert 'Environment=AMR_BLACK_BOX_ENABLED=false' in service
     assert 'source "$ROBOT_WORKSPACE/setup.bash"' in service
     assert '--params-file "$ROBOT_PROFILE_FILE"' in service
     assert 'Restart=always' in service
@@ -28,6 +29,7 @@ def test_agent_embeds_low_overhead_black_box_recorder():
         PACKAGE_ROOT / 'amr_web_bridge' / 'web_bridge_node.py'
     ).read_text(encoding='utf-8')
     assert 'BlackBoxRecorder(parameter_overrides=[' in source
+    assert "os.getenv('AMR_BLACK_BOX_ENABLED', 'true')" in source
     assert "Parameter('retention_seconds', value=300.0)" in source
     assert "Parameter('max_topic_hz', value=1.0)" in source
     assert "Parameter('record_scan', value=False)" in source

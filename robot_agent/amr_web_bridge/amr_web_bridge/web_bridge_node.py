@@ -6103,21 +6103,28 @@ class WebBridgeNode(Node):
 def main(args=None) -> None:
     rclpy.init(args=args)
     node = WebBridgeNode()
-    recorder = BlackBoxRecorder(parameter_overrides=[
-        Parameter(
-            'directory', value='/var/lib/indoor-delivery-robot/black-box'),
-        Parameter(
-            'incident_directory',
-            value='/var/lib/indoor-delivery-robot/incidents'),
-        Parameter('retention_seconds', value=300.0),
-        Parameter('max_topic_hz', value=1.0),
-        Parameter('record_scan', value=False),
-        Parameter('record_tf', value=False),
-        Parameter('record_extended_navigation', value=False),
-    ])
+    black_box_enabled = (
+        os.getenv('AMR_BLACK_BOX_ENABLED', 'true').strip().lower()
+        not in {'0', 'false', 'no', 'off'}
+    )
+    recorder = None
+    if black_box_enabled:
+        recorder = BlackBoxRecorder(parameter_overrides=[
+            Parameter(
+                'directory', value='/var/lib/indoor-delivery-robot/black-box'),
+            Parameter(
+                'incident_directory',
+                value='/var/lib/indoor-delivery-robot/incidents'),
+            Parameter('retention_seconds', value=300.0),
+            Parameter('max_topic_hz', value=1.0),
+            Parameter('record_scan', value=False),
+            Parameter('record_tf', value=False),
+            Parameter('record_extended_navigation', value=False),
+        ])
     executor = SingleThreadedExecutor()
     executor.add_node(node)
-    executor.add_node(recorder)
+    if recorder is not None:
+        executor.add_node(recorder)
 
     try:
         executor.spin()
@@ -6125,7 +6132,8 @@ def main(args=None) -> None:
         pass
     finally:
         executor.shutdown()
-        recorder.destroy_node()
+        if recorder is not None:
+            recorder.destroy_node()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
