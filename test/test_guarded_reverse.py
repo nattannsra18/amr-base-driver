@@ -4,21 +4,21 @@ import threading
 from types import SimpleNamespace
 
 from amr_base_driver.guarded_reverse import (
+    adjacent_cluster_clearance,
+    arc_motion_complete,
     DEFAULT_ARC_DISTANCE,
     DEFAULT_ARC_YAW,
     DEFAULT_WHEEL_SEPARATION,
-    adjacent_cluster_clearance,
-    arc_motion_complete,
+    GuardedReverse,
     measured_arc_progress,
-    rolling_pivot_turn_rate,
     normalize_angle,
     recovery_sector_clearances,
     robust_front_clearance,
     robust_rear_clearance,
     robust_turn_side_clearance,
+    rolling_pivot_turn_rate,
     swept_arc_obstacle_distance,
     swept_straight_obstacle_distance,
-    GuardedReverse,
 )
 
 

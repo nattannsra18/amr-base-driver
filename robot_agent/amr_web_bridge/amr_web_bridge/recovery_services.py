@@ -10,7 +10,8 @@ def call_service(
     timeout_seconds=2.0,
     discovery_timeout_seconds=0.25,
 ):
-    """Return (response, detail); the ROS executor must keep spinning.
+    """
+    Return (response, detail); the ROS executor must keep spinning.
 
     Do not call from a ROS callback on the single-threaded executor. A timeout
     does not retract a request already delivered to the server; callers must

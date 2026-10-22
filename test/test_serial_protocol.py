@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 from amr_base_driver.serial_bridge import crc16_ccitt
 from amr_base_driver.serial_bridge import SerialBridge
-from amr_base_driver.serial_bridge import TELEMETRY_LENGTH
 from amr_base_driver.serial_bridge import TELEMETRY_FORMAT
+from amr_base_driver.serial_bridge import TELEMETRY_LENGTH
 from amr_base_driver.serial_bridge import trim_straight_wheel_rpm
 from amr_base_driver.serial_bridge import wheel_is_stalled
 from amr_base_driver.serial_bridge import wrapped_int32_delta
