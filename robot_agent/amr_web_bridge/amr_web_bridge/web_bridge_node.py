@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from datetime import datetime, timezone
 import json
 import math
@@ -502,15 +501,6 @@ class WebBridgeNode(Node):
         self.localization_convergence_samples = 0
         self.localization_scan_active = False
         self.localization_scan_started_monotonic: float | None = None
-        self.localization_verification_command_id: str | None = None
-        self.localization_verified_command_id: str | None = None
-        self.localization_verification_started_monotonic: float | None = None
-        self.localization_verification_started_ros_ns: int | None = None
-        self.localization_verification_initial_position_uncertainty: float | None = None
-        self.localization_verification_initial_yaw_uncertainty: float | None = None
-        self.localization_verification_samples: deque[
-            tuple[float, float, float]
-        ] = deque(maxlen=200)
         self.command_queue: Queue[
             dict[str, Any]
         ] = Queue()
@@ -932,42 +922,20 @@ class WebBridgeNode(Node):
         with self.telemetry_lock:
             self.latest_telemetry = telemetry
         covariance = message.pose.covariance
-        received_at = time.monotonic()
-        stamp_ns = (
-            int(message.header.stamp.sec) * 1_000_000_000
-            + int(message.header.stamp.nanosec)
-        )
-        position_uncertainty = math.sqrt(max(
-            0.0,
-            float(covariance[0]),
-            float(covariance[7]),
-        ))
-        yaw_uncertainty = math.sqrt(max(0.0, float(covariance[35])))
         with self.localization_lock:
             self.latest_localization_pose = {
                 'frame_id': message.header.frame_id or 'map',
                 'x': float(pose.position.x),
                 'y': float(pose.position.y),
                 'yaw': float(yaw),
-                'position_uncertainty': position_uncertainty,
-                'yaw_uncertainty': yaw_uncertainty,
-                'stamp_nanoseconds': stamp_ns,
+                'position_uncertainty': math.sqrt(max(
+                    0.0,
+                    float(covariance[0]),
+                    float(covariance[7]),
+                )),
+                'yaw_uncertainty': math.sqrt(max(0.0, float(covariance[35]))),
             }
-            self.last_localization_monotonic = received_at
-            verification_started = self.localization_verification_started_monotonic
-            verification_ros_ns = self.localization_verification_started_ros_ns
-            if (
-                self.localization_verification_command_id is not None
-                and verification_started is not None
-                and received_at > verification_started
-                and verification_ros_ns is not None
-                and stamp_ns > verification_ros_ns
-            ):
-                self.localization_verification_samples.append((
-                    received_at,
-                    position_uncertainty,
-                    yaw_uncertainty,
-                ))
+            self.last_localization_monotonic = time.monotonic()
 
     def odom_callback(
         self,
@@ -1170,55 +1138,6 @@ class WebBridgeNode(Node):
             float(math.atan2(sin_yaw, cos_yaw)),
         )
 
-    def lookup_planar_pose_stamped(
-        self,
-        target_frame: str,
-        source_frame: str,
-    ) -> tuple[float, float, float, int]:
-        transform = self.tf_buffer.lookup_transform(
-            target_frame,
-            source_frame,
-            Time(),
-        )
-        orientation = transform.transform.rotation
-        sin_yaw = 2.0 * (
-            orientation.w * orientation.z
-            + orientation.x * orientation.y
-        )
-        cos_yaw = 1.0 - 2.0 * (
-            orientation.y * orientation.y
-            + orientation.z * orientation.z
-        )
-        stamp = transform.header.stamp
-        return (
-            float(transform.transform.translation.x),
-            float(transform.transform.translation.y),
-            float(math.atan2(sin_yaw, cos_yaw)),
-            int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec),
-        )
-
-    def begin_localization_verification(
-        self,
-        command_id: str,
-        *,
-        position_uncertainty: float | None = None,
-        yaw_uncertainty: float | None = None,
-    ) -> None:
-        with self.localization_lock:
-            self.localization_verification_command_id = command_id
-            self.localization_verified_command_id = None
-            self.localization_verification_started_monotonic = time.monotonic()
-            self.localization_verification_started_ros_ns = (
-                self.get_clock().now().nanoseconds
-            )
-            self.localization_verification_initial_position_uncertainty = (
-                position_uncertainty
-            )
-            self.localization_verification_initial_yaw_uncertainty = (
-                yaw_uncertainty
-            )
-            self.localization_verification_samples.clear()
-
     def capture_mapping_pose_reference(self) -> None:
         try:
             self.mapping_pose_reference = (
@@ -1359,17 +1278,6 @@ class WebBridgeNode(Node):
             recovery_active = self.localization_recovery_active
             scan_active = self.localization_scan_active
             scan_started = self.localization_scan_started_monotonic
-            verification_command_id = self.localization_verification_command_id
-            verified_command_id = self.localization_verified_command_id
-            verification_started = self.localization_verification_started_monotonic
-            verification_ros_ns = self.localization_verification_started_ros_ns
-            initial_position_uncertainty = (
-                self.localization_verification_initial_position_uncertainty
-            )
-            initial_yaw_uncertainty = (
-                self.localization_verification_initial_yaw_uncertainty
-            )
-            verification_samples = list(self.localization_verification_samples)
         with self.velocity_lock:
             velocity = (
                 dict(self.latest_velocity)
@@ -1384,16 +1292,9 @@ class WebBridgeNode(Node):
         )
         pose_age = max(0.0, now - last_received) if last_received is not None else None
         tf_available = False
-        tf_stamp_ns: int | None = None
         pose = last_pose
         try:
-            stamped_lookup = getattr(self, 'lookup_planar_pose_stamped', None)
-            if stamped_lookup is not None:
-                x, y, yaw, tf_stamp_ns = stamped_lookup(
-                    'map', 'base_footprint'
-                )
-            else:
-                x, y, yaw = self.lookup_planar_pose('map', 'base_footprint')
+            x, y, yaw = self.lookup_planar_pose('map', 'base_footprint')
             tf_available = True
             pose = {
                 **(last_pose or {}),
@@ -1414,58 +1315,6 @@ class WebBridgeNode(Node):
         yaw_uncertainty = (
             last_pose.get('yaw_uncertainty') if last_pose else None
         )
-        verification_pending = verification_command_id != verified_command_id
-        verification_elapsed = (
-            max(0.0, now - verification_started)
-            if verification_started is not None else 0.0
-        )
-        tf_is_fresh = bool(
-            tf_available
-            and verification_ros_ns is not None
-            and tf_stamp_ns is not None
-            and tf_stamp_ns > verification_ros_ns
-        )
-        covariance_improved = False
-        samples_span = 0.0
-        if len(verification_samples) >= 2:
-            first = verification_samples[0]
-            latest = verification_samples[-1]
-            baseline_position = initial_position_uncertainty or first[1]
-            baseline_yaw = initial_yaw_uncertainty or first[2]
-            samples_span = max(0.0, latest[0] - first[0])
-            not_regressing = (
-                latest[1] <= baseline_position * 1.05
-                and latest[2] <= baseline_yaw * 1.05
-            )
-            covariance_improved = not_regressing and (
-                latest[1] <= baseline_position * 0.98
-                or latest[2] <= baseline_yaw * 0.98
-            )
-        verification_converged = bool(
-            verification_command_id
-            and len(verification_samples) >= 5
-            and verification_elapsed >= 3.0
-            and samples_span >= 3.0
-            and tf_is_fresh
-            and covariance_improved
-            and position_uncertainty is not None
-            and yaw_uncertainty is not None
-            and position_uncertainty <= 1.0
-            and yaw_uncertainty <= 0.75
-        )
-        if verification_converged:
-            with self.localization_lock:
-                self.localization_verified_command_id = verification_command_id
-                self.localization_recovery_active = False
-                self.localization_recovery_started_monotonic = None
-                self.localization_convergence_samples = 0
-                self.localization_scan_active = False
-                self.localization_scan_started_monotonic = None
-            verified_command_id = verification_command_id
-            verification_pending = False
-            scan_active = False
-            scan_started = None
-            self.publish_zero_velocity()
         if mapping_active:
             health, reason, detail = (
                 'UNKNOWN', 'MAPPING_ACTIVE', 'Localization is paused during mapping'
@@ -1477,16 +1326,6 @@ class WebBridgeNode(Node):
         elif pose is None:
             health = 'LOST' if now - self.node_started_monotonic > 5.0 else 'UNKNOWN'
             reason, detail = 'NO_POSE', 'No AMCL pose has been received'
-        elif verification_pending:
-            health, reason, detail = (
-                'PROVISIONAL',
-                'VERIFYING' if verification_command_id else 'VERIFICATION_REQUIRED',
-                (
-                    'Pose accepted — verifying fresh AMCL pose, transform, and covariance'
-                    if verification_command_id
-                    else 'Set Initial Pose, then verify localization before navigation'
-                ),
-            )
         elif not tf_available:
             health, reason, detail = (
                 'LOST', 'TF_UNAVAILABLE', 'map to base_footprint transform is unavailable'
@@ -1556,10 +1395,6 @@ class WebBridgeNode(Node):
                 min(1.0, max(0.0, (now - scan_started) / self.localization_scan_timeout_seconds))
                 if scan_active and scan_started is not None else 0.0
             ),
-            'verification_command_id': verification_command_id,
-            'verification_sample_count': len(verification_samples),
-            'verification_elapsed_seconds': verification_elapsed,
-            'verification_tf_fresh': tf_is_fresh,
             'detail': detail,
         }
 
@@ -2125,27 +1960,6 @@ class WebBridgeNode(Node):
             },
             freshness_seconds=self.profile_data_freshness_seconds,
         )
-        localization = self.localization_snapshot()
-        localization_verified = bool(
-            localization.get('health') == 'LOCALIZED'
-            and localization.get('reason') == 'READY'
-        )
-        if not localization_verified:
-            report['checks'].append({
-                'check_id': 'localization.verified',
-                'category': 'DATA',
-                'status': 'FAIL',
-                'message': 'Localization verification is incomplete',
-                'observed': str(
-                    localization.get('detail')
-                    or localization.get('reason')
-                    or 'unknown'
-                )[:200],
-            })
-            report['status'] = 'NOT_READY'
-            report['detail'] = (
-                'Set and verify the Initial Pose before accepting navigation tasks'
-            )
         checks = {
             item['check_id']: item['status'] == 'PASS'
             for item in report['checks']
@@ -3017,11 +2831,6 @@ class WebBridgeNode(Node):
 
     def publish_initial_pose_command(self, command: dict[str, Any]) -> None:
         pose = command['pose']
-        self.begin_localization_verification(
-            str(command['command_id']),
-            position_uncertainty=float(command['position_uncertainty']),
-            yaw_uncertainty=float(command['yaw_uncertainty']),
-        )
         self.publish_initial_pose(
             float(pose['x']),
             float(pose['y']),
@@ -3049,7 +2858,6 @@ class WebBridgeNode(Node):
     ) -> None:
         try:
             future.result()
-            self.begin_localization_verification(str(command['command_id']))
             with self.localization_lock:
                 self.localization_recovery_count += 1
                 self.localization_recovery_active = True
@@ -3270,24 +3078,6 @@ class WebBridgeNode(Node):
         message: dict[str, Any],
     ) -> None:
         request_id = message.get('request_id')
-
-        localization = self.localization_snapshot()
-        if localization.get('health') != 'LOCALIZED':
-            await self.send_json(
-                websocket,
-                {
-                    'type': 'route_preview_result',
-                    'request_id': request_id if isinstance(request_id, str) else '',
-                    'status': 'unavailable',
-                    'detail': (
-                        localization.get('detail')
-                        or 'Localization verification is incomplete'
-                    ),
-                    'pickup_path': [],
-                    'delivery_path': [],
-                },
-            )
-            return
 
         with self.map_command_lock:
             map_switch_active = (

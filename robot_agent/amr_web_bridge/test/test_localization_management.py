@@ -1,5 +1,4 @@
 import asyncio
-from collections import deque
 from queue import Queue
 import threading
 import time
@@ -32,13 +31,6 @@ def bridge(*, pose_age=0.2, moving=False, uncertainty=0.1, mapping=False):
         localization_convergence_samples=0,
         localization_scan_active=False,
         localization_scan_started_monotonic=None,
-        localization_verification_command_id='verified:test',
-        localization_verified_command_id='verified:test',
-        localization_verification_started_monotonic=now - 10.0,
-        localization_verification_started_ros_ns=1,
-        localization_verification_initial_position_uncertainty=None,
-        localization_verification_initial_yaw_uncertainty=None,
-        localization_verification_samples=deque(maxlen=200),
         localization_scan_angular_speed=0.26,
         localization_scan_timeout_seconds=28.0,
         latest_velocity={
@@ -64,9 +56,6 @@ def bridge(*, pose_age=0.2, moving=False, uncertainty=0.1, mapping=False):
         localization_velocity_active=False,
         sent=[],
         publish_zero_velocity=lambda: None,
-        get_clock=lambda: SimpleNamespace(
-            now=lambda: SimpleNamespace(nanoseconds=10_000_000_000)
-        ),
     )
     value.localization_snapshot = lambda: WebBridgeNode.localization_snapshot(value)
     value.motion_stop_latched = (
@@ -81,10 +70,6 @@ def bridge(*, pose_age=0.2, moving=False, uncertainty=0.1, mapping=False):
     )
     value.publish_initial_pose_command = (
         lambda command: WebBridgeNode.publish_initial_pose_command(value, command)
-    )
-    value.begin_localization_verification = (
-        lambda command_id, **kwargs:
-        WebBridgeNode.begin_localization_verification(value, command_id, **kwargs)
     )
     value.localization_resume_callback = (
         lambda future, command:
@@ -144,63 +129,6 @@ def test_initial_pose_command_is_published_and_acknowledged():
     assert value.sent[-1]['accepted'] is True
     assert value.localization_recovery_count == 1
     assert value.localization_recovery_active is True
-    assert value.sent[-1]['health'] == 'PROVISIONAL'
-    assert value.sent[-1]['reason'] == 'VERIFYING'
-
-
-def test_verification_requires_fresh_tf_three_seconds_and_improving_covariance():
-    value = bridge()
-    now = time.monotonic()
-    value.localization_verification_command_id = 'localization-test'
-    value.localization_verified_command_id = None
-    value.localization_verification_started_monotonic = now - 4.0
-    value.localization_verification_started_ros_ns = 10_000_000_000
-    value.localization_recovery_active = True
-    value.localization_verification_samples.extend([
-        (now - 3.5, 0.50, 0.40),
-        (now - 2.7, 0.48, 0.39),
-        (now - 1.9, 0.45, 0.37),
-        (now - 1.1, 0.42, 0.35),
-        (now - 0.3, 0.39, 0.32),
-    ])
-    value.latest_localization_pose['position_uncertainty'] = 0.39
-    value.latest_localization_pose['yaw_uncertainty'] = 0.32
-    value.lookup_planar_pose_stamped = (
-        lambda _parent, _child: (1.1, -2.1, 0.45, 11_000_000_000)
-    )
-
-    snapshot = WebBridgeNode.localization_snapshot(value)
-
-    assert snapshot['health'] == 'LOCALIZED'
-    assert snapshot['reason'] == 'READY'
-    assert snapshot['verification_tf_fresh'] is True
-    assert value.localization_verified_command_id == 'localization-test'
-    assert value.localization_recovery_active is False
-
-
-def test_old_tf_keeps_initial_pose_provisional():
-    value = bridge()
-    now = time.monotonic()
-    value.localization_verification_command_id = 'localization-test'
-    value.localization_verified_command_id = None
-    value.localization_verification_started_monotonic = now - 4.0
-    value.localization_verification_started_ros_ns = 10_000_000_000
-    value.localization_verification_samples.extend([
-        (now - 3.5, 0.50, 0.40),
-        (now - 2.7, 0.48, 0.39),
-        (now - 1.9, 0.45, 0.37),
-        (now - 1.1, 0.42, 0.35),
-        (now - 0.3, 0.39, 0.32),
-    ])
-    value.lookup_planar_pose_stamped = (
-        lambda _parent, _child: (1.1, -2.1, 0.45, 9_000_000_000)
-    )
-
-    snapshot = WebBridgeNode.localization_snapshot(value)
-
-    assert snapshot['health'] == 'PROVISIONAL'
-    assert snapshot['reason'] == 'VERIFYING'
-    assert snapshot['verification_tf_fresh'] is False
 
 
 def test_amcl_state_callback_accepts_active_lifecycle_id():
