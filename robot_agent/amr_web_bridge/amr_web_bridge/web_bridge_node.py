@@ -471,6 +471,9 @@ class WebBridgeNode(Node):
         self.physical_estop_latched = threading.Event()
         self.last_emergency_command_id: str | None = None
         self.latest_telemetry: dict[str, Any] | None = None
+        self._system_metrics_last_read = 0.0
+        self._system_metrics: dict[str, float] | None = None
+        self._cpu_sample: tuple[int, int] | None = None
         self.latest_map: dict[str, Any] | None = None
         self.latest_diagnostics: dict[str, Any] | None = None
         self.latest_velocity: (
@@ -913,6 +916,7 @@ class WebBridgeNode(Node):
             'battery_source': battery_source,
             'frame_id': message.header.frame_id or 'map',
             'timestamp': self.utc_timestamp(),
+            'system': self.system_metrics(),
         }
 
         with self.telemetry_lock:
@@ -1060,9 +1064,54 @@ class WebBridgeNode(Node):
             'battery_source': battery_source,
             'frame_id': 'map',
             'timestamp': self.utc_timestamp(),
+            'system': self.system_metrics(),
         }
         with self.telemetry_lock:
             self.latest_telemetry = telemetry
+
+    def system_metrics(self) -> dict[str, float] | None:
+        """Read low-rate host metrics without adding a dependency to the ODROID image."""
+        now = time.monotonic()
+        if (
+            self._system_metrics is not None
+            and now - self._system_metrics_last_read < 2.0
+        ):
+            return self._system_metrics
+        try:
+            cpu_fields = [
+                int(value)
+                for value in FilePath('/proc/stat').read_text().splitlines()[0].split()[1:]
+            ]
+            total, idle = sum(cpu_fields), cpu_fields[3]
+            cpu = 0.0
+            if self._cpu_sample is not None:
+                previous_total, previous_idle = self._cpu_sample
+                delta_total = total - previous_total
+                cpu = (
+                    100.0 * (1.0 - (idle - previous_idle) / delta_total)
+                    if delta_total else 0.0
+                )
+            self._cpu_sample = (total, idle)
+            memory = {
+                line.split(':', 1)[0]: int(line.split()[1])
+                for line in FilePath('/proc/meminfo').read_text().splitlines()
+                if ':' in line
+            }
+            memory_percent = 100.0 * (1.0 - memory['MemAvailable'] / memory['MemTotal'])
+            thermal = FilePath('/sys/class/thermal/thermal_zone0/temp')
+            temperature = (
+                float(thermal.read_text().strip()) / 1000.0
+                if thermal.exists() else 0.0
+            )
+            self._system_metrics = {
+                'cpu_percent': max(0.0, min(100.0, cpu)),
+                'memory_percent': max(0.0, min(100.0, memory_percent)),
+                'temperature_c': temperature,
+            }
+            self._system_metrics_last_read = now
+        except (OSError, KeyError, ValueError, IndexError):
+            return self._system_metrics
+        return self._system_metrics
 
     def lookup_planar_pose(
         self,
@@ -2235,6 +2284,8 @@ class WebBridgeNode(Node):
             await self.handle_mapping_command(websocket, message)
         elif message_type == 'mapping_teleop':
             await self.handle_mapping_teleop(websocket, message)
+        elif message_type == 'manual_teleop':
+            await self.handle_manual_teleop(websocket, message)
         elif message_type == 'localization_teleop':
             await self.handle_localization_teleop(websocket, message)
         elif message_type == 'localization_scan':
@@ -2481,6 +2532,40 @@ class WebBridgeNode(Node):
         if not valid:
             self.get_logger().warning(
                 'Rejected invalid mapping teleoperation command'
+            )
+            return
+        twist = Twist()
+        twist.linear.x = float(linear_x)
+        twist.angular.z = float(angular_z)
+        self.manual_velocity_publisher.publish(twist)
+        with self.mapping_velocity_lock:
+            self.mapping_velocity_deadline = time.monotonic() + self.mapping_teleop_deadman_seconds
+            self.mapping_velocity_active = bool(linear_x or angular_z)
+
+    async def handle_manual_teleop(
+        self,
+        websocket: Any,
+        message: dict[str, Any],
+    ) -> None:
+        snapshot = self.mapping_runtime.snapshot(self.map_revision)
+        linear_x = message.get('linear_x')
+        angular_z = message.get('angular_z')
+        valid = (
+            message.get('robot_id') == self.robot_id
+            and snapshot.get('phase') == 'IDLE'
+            and not self.motion_stop_latched()
+            and isinstance(linear_x, (int, float))
+            and not isinstance(linear_x, bool)
+            and isinstance(angular_z, (int, float))
+            and not isinstance(angular_z, bool)
+            and math.isfinite(float(linear_x))
+            and math.isfinite(float(angular_z))
+            and abs(float(linear_x)) <= 0.30
+            and abs(float(angular_z)) <= 1.0
+        )
+        if not valid:
+            self.get_logger().warning(
+                'Rejected invalid manual teleoperation command'
             )
             return
         twist = Twist()
