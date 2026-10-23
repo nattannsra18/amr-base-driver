@@ -38,6 +38,10 @@ def bridge():
 
     value.send_json = send_json
     value.send_from_ros = value.sent.append
+    value.localization_snapshot = lambda: {
+        'health': 'LOCALIZED',
+        'detail': 'Localization verified',
+    }
     value.get_logger = lambda: SimpleNamespace(
         info=lambda _message: None,
     )
@@ -90,6 +94,22 @@ def test_invalid_preview_returns_unavailable_result():
     assert value.preview_queue.empty()
     assert value.sent[-1]['type'] == 'route_preview_result'
     assert value.sent[-1]['status'] == 'unavailable'
+
+
+def test_preview_is_rejected_until_localization_is_verified():
+    value = bridge()
+    value.localization_snapshot = lambda: {
+        'health': 'PROVISIONAL',
+        'detail': 'Pose accepted — verifying',
+    }
+
+    asyncio.run(WebBridgeNode.queue_route_preview(
+        value, object(), preview_request()
+    ))
+
+    assert value.preview_queue.empty()
+    assert value.sent[-1]['status'] == 'unavailable'
+    assert value.sent[-1]['detail'] == 'Pose accepted — verifying'
 
 
 def test_preview_is_rejected_while_map_switch_is_active():
